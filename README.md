@@ -18,6 +18,8 @@ Si le Rift est en train de démarrer, le lecteur réessaie pendant 30 secondes. 
 | Pointer et appuyer sur la gâchette ou sur **A** dans un menu | Confirme l’élément surligné en une seule action. |
 | Appuyer sur la gâchette sous l’index pendant la lecture | Affiche une petite barre de lecture flottante. Appuie à côté de la barre ou utilise **B** pour la fermer. |
 | Pointer le curseur de lecture et maintenir la gâchette sous l’index | Fais glisser le curseur, puis relâche pour aller au moment choisi. |
+| Pointer le curseur de volume et maintenir la gâchette sous l’index | Fais glisser le curseur pour régler le volume en direct. |
+| Pointer **Sourdine** ou **Rétablir le son**, puis appuyer sur la gâchette sous l’index | Coupe ou rétablit le son au volume choisi. |
 | Maintenir la gâchette latérale de la poignée, tourner ou incliner la manette, puis relâcher | Oriente la vidéo et conserve l’angle choisi. |
 | Joystick gauche ou droite pendant la lecture | Recule ou avance de 10 secondes. Maintenir répète le saut. |
 | Gâchette latérale maintenue + joystick gauche ou droite sur la même manette | Ouvre la vidéo précédente ou suivante dans le dossier. Ramène le joystick au centre avant de changer de vidéo à nouveau. |

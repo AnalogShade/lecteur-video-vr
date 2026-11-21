@@ -13,7 +13,9 @@ public:
     void togglePause();
     void seek(double seconds, bool absolute = false);
     void mute();
+    bool muted() const;
     void volume(int percent);
+    double volume() const;
     double time() const;
     double duration() const;
     bool paused() const;

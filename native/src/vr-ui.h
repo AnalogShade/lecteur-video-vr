@@ -16,8 +16,17 @@ constexpr int sourcesRight = 286;
 constexpr int filesLeft = 308;
 constexpr float panelWidth = 1.72f;
 constexpr float panelHeight = panelWidth * height / width;
-constexpr int timelineHeight = 132;
+constexpr int timelineHeight = 212;
 constexpr float timelineWidth = 1.45f;
+constexpr int timelineTrackStart = margin + 18;
+constexpr int timelineTrackY = 86;
+constexpr int volumeTrackStart = 228;
+constexpr int volumeTrackEnd = 680;
+constexpr int volumeTrackY = 166;
+constexpr int muteLeft = 720;
+constexpr int muteRight = width - timelineTrackStart;
+constexpr int muteTop = 141;
+constexpr int muteBottom = 191;
 enum class Surface { None, Full, Timeline };
 
 inline float surfaceWidth(Surface surface) { return surface == Surface::Timeline ? timelineWidth : panelWidth; }
@@ -25,7 +34,23 @@ inline int surfacePixels(Surface surface) { return surface == Surface::Timeline 
 inline float surfaceHeight(Surface surface) { return surfaceWidth(surface) * surfacePixels(surface) / width; }
 
 inline bool hitsTimeline(float u, float v) {
-    return u * width >= margin && u * width < width - margin && v >= .35f && v < 1.f;
+    const float y = v * timelineHeight;
+    return u * width >= margin && u * width < width - margin && y >= 48 && y < 124;
+}
+
+inline bool hitsVolume(float u, float v) {
+    const float x = u * width, y = v * timelineHeight;
+    return x >= volumeTrackStart - 18 && x <= volumeTrackEnd + 18 && y >= muteTop && y < muteBottom;
+}
+
+inline bool hitsMute(float u, float v) {
+    const float x = u * width, y = v * timelineHeight;
+    return x >= muteLeft && x < muteRight && y >= muteTop && y < muteBottom;
+}
+
+inline int volumePosition(float u) {
+    const float fraction = (u * width - volumeTrackStart) / (volumeTrackEnd - volumeTrackStart);
+    return static_cast<int>(std::clamp(fraction, 0.f, 1.f) * 100.f + .5f);
 }
 
 enum class Trigger { Idle, Pressed, Held, Released, Cancelled };
@@ -37,8 +62,7 @@ struct Pointer {
 };
 
 inline double timelinePosition(float u) {
-    constexpr int trackStart = margin + 18;
-    return std::clamp((u * width - trackStart) / (width - 2. * trackStart), 0., 1.);
+    return std::clamp((u * width - timelineTrackStart) / (width - 2. * timelineTrackStart), 0., 1.);
 }
 
 class ConfirmPress {

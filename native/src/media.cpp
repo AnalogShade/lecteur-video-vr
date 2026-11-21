@@ -196,7 +196,9 @@ void Media::tick() {
 
 void Media::togglePause() { state_->command("cycle", "pause"); }
 void Media::mute() { state_->command("cycle", "mute"); }
+bool Media::muted() const { return state_->property<int>("mute", MPV_FORMAT_FLAG) != 0; }
 void Media::volume(int percent) { state_->check(state_->mpv_set_property_string(state_->player, "volume", std::to_string(percent).c_str())); }
+double Media::volume() const { return state_->property<double>("volume", MPV_FORMAT_DOUBLE); }
 void Media::seek(double seconds, bool absolute) {
     if (duration() > 0) state_->command("seek", std::to_string(seconds).c_str(), absolute ? "absolute+exact" : "relative+exact");
 }
