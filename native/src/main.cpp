@@ -28,7 +28,7 @@ constexpr int projectionCount = 5;
 constexpr int stereoCount = 3;
 constexpr int shortcutsInLibrary = 6;
 
-enum class VrPage { Hidden, Library, Playback, Settings };
+enum class VrPage { Hidden, Library, Playback, Settings, Timeline };
 enum class VrAction {
     Drives, Parent, Library, Playback, Settings, Source, Entry, Favorite, Auto, Projection, Stereo, SwapEyes,
     Narrow, Widen, DepthDown, DepthUp, Play, Timeline, Rewind, Advance, PreviousFile, NextFile, Center,
@@ -59,6 +59,13 @@ public:
     ~TestBookmarksFile() {
         std::error_code error;
         fs::remove(path, error);
+        const fs::path state(path.wstring() + L".positions");
+        fs::directory_iterator first(state, error), end;
+        for (; first != end && !error; first.increment(error)) {
+            std::error_code ignored;
+            fs::remove(first->path(), ignored);
+        }
+        fs::remove(state, error);
     }
     fs::path path;
 };
@@ -119,7 +126,7 @@ public:
     ID3D11ShaderResourceView* get() const { return resource_.Get(); }
 
     void update(const std::wstring& title, const std::wstring& subtitle, const VrColumn& files,
-                const VrColumn* sources, double progress, bool dragging, bool playback) {
+                const VrColumn* sources, double progress, bool dragging, bool playback, bool compact) {
         HDC dc = CreateCompatibleDC(nullptr);
         if (!dc) throw std::runtime_error("Création du menu VR impossible.");
         BITMAPINFO info{};
@@ -137,20 +144,25 @@ public:
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         auto oldFont = SelectObject(dc, font);
         SetBkMode(dc, TRANSPARENT);
-        fill(dc, {0, 0, VrUi::width, VrUi::height}, background);
-        fill(dc, {0, 0, VrUi::width, 7}, accent);
+        fill(dc, {0, 0, VrUi::width, compact ? VrUi::timelineHeight : VrUi::height}, background);
+        if (!compact) fill(dc, {0, 0, VrUi::width, 7}, accent);
         const auto line = [&](const std::wstring& text, int top, COLORREF color, int left = 32, int right = VrUi::width - 28) {
             RECT bounds{left, top, right, top + 38};
             SetTextColor(dc, color);
             DrawTextW(dc, text.c_str(), -1, &bounds, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_VCENTER);
         };
-        line(title, 17, textColor);
-        const int filesStart = sources ? VrUi::filesLeft : VrUi::margin;
-        if (sources) {
-            fill(dc, {VrUi::margin, 60, VrUi::sourcesRight, 522}, RGB(21, 22, 33));
-            line(L"Disques et favoris", 60, accent, VrUi::margin + 12, VrUi::sourcesRight - 10);
-        }
-        line(subtitle, 60, muted, filesStart + 12);
+        const auto drawTrack = [&](int x1, int x2, int y) {
+            const int handle = x1 + static_cast<int>((x2 - x1) * progress);
+            fill(dc, {x1, y - 3, x2, y + 3}, RGB(78, 77, 103));
+            fill(dc, {x1, y - 3, handle, y + 3}, accent);
+            auto oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+            auto oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+            SetDCBrushColor(dc, dragging ? RGB(255, 239, 255) : accent);
+            const int radius = dragging ? 11 : 8;
+            Ellipse(dc, handle - radius, y - radius, handle + radius, y + radius);
+            SelectObject(dc, oldBrush);
+            SelectObject(dc, oldPen);
+        };
         const auto draw = [&](const VrColumn& column, int left, int right) {
             const int count = static_cast<int>(column.rows.size());
             const int first = VrUi::firstRow(count, column.selected);
@@ -162,27 +174,30 @@ public:
                 if (highlighted) fill(dc, {left, y, left + 4, y + VrUi::rowHeight}, accent);
                 if (row.action == VrAction::Timeline) {
                     const int start = left + 18, end = right - 18;
-                    const int handle = start + static_cast<int>((end - start) * progress);
-                    fill(dc, {start, y + 29, end, y + 35}, RGB(78, 77, 103));
-                    fill(dc, {start, y + 29, handle, y + 35}, accent);
-                    auto oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-                    auto oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
-                    SetDCBrushColor(dc, dragging ? RGB(255, 239, 255) : accent);
-                    const int radius = dragging ? 9 : 7;
-                    Ellipse(dc, handle - radius, y + 32 - radius, handle + radius, y + 32 + radius);
-                    SelectObject(dc, oldBrush);
-                    SelectObject(dc, oldPen);
+                    drawTrack(start, end, y + 32);
                     line(row.label, y - 4, textColor, start, end);
                 } else {
                     line(row.label, y, highlighted ? RGB(249, 243, 255) : textColor, left + 16, right - 12);
                 }
             }
         };
-        if (sources) draw(*sources, VrUi::margin, VrUi::sourcesRight);
-        draw(files, filesStart, VrUi::width - VrUi::margin);
-        line(dragging ? L"Relâche la gâchette pour reprendre à cet endroit"
-            : playback ? L"Gâchette maintenue : déplacer le curseur   ·   Poignée : masquer"
-            : L"Pointe et confirme avec la gâchette ou A     B : retour", 547, accent);
+        if (compact) {
+            line(subtitle, 14, textColor, 42);
+            drawTrack(42, VrUi::width - 42, 86);
+        } else {
+            line(title, 17, textColor);
+            const int filesStart = sources ? VrUi::filesLeft : VrUi::margin;
+            if (sources) {
+                fill(dc, {VrUi::margin, 60, VrUi::sourcesRight, 522}, RGB(21, 22, 33));
+                line(L"Disques et favoris", 60, accent, VrUi::margin + 12, VrUi::sourcesRight - 10);
+                draw(*sources, VrUi::margin, VrUi::sourcesRight);
+            }
+            line(subtitle, 60, muted, filesStart + 12);
+            draw(files, filesStart, VrUi::width - VrUi::margin);
+            line(dragging ? L"Relâche la gâchette pour reprendre à cet endroit"
+                : playback ? L"Gâchette maintenue : déplacer le curseur   ·   B : retour"
+                : L"Pointe et confirme avec la gâchette ou A     B : retour", 547, accent);
+        }
         GdiFlush();
         context_->UpdateSubresource(texture_.Get(), 0, nullptr, pixels, VrUi::width * 4, 0);
         SelectObject(dc, oldFont);
@@ -200,11 +215,13 @@ private:
 
 class Player {
 public:
-    explicit Player(bool silent = false, fs::path bookmarksFile = Library::settingsFile()) : library_(std::move(bookmarksFile)) {
+    explicit Player(bool silent = false, fs::path bookmarksFile = Library::settingsFile()) : library_(bookmarksFile) {
         try { vr_ = std::make_unique<Vr>(); }
         catch (const std::exception& error) { vrError_ = wide(error.what()); }
         renderer_ = std::make_unique<Renderer>(vr_ ? &vr_->adapter() : nullptr);
-        media_ = std::make_unique<Media>(renderer_->device(), silent);
+        resumeDirectory_ = silent ? fs::path(bookmarksFile.wstring() + L".positions")
+            : bookmarksFile.parent_path() / L"positions";
+        media_ = std::make_unique<Media>(renderer_->device(), silent, resumeDirectory_);
         menuTexture_ = std::make_unique<MenuTexture>(renderer_->device());
     }
 
@@ -341,11 +358,15 @@ public:
                 if (!waitFor([&] { return media_->time() < 2.; }, 2)) throw std::runtime_error("La commande Recul a échoué.");
                 vrCommand(VrCommand::Select);
                 if (!waitFor([&] { return !media_->paused(); }, 2)) throw std::runtime_error("La commande Lecture a échoué.");
-                vrCommand(VrCommand::PlaybackMenu);
-                if (page_ != VrPage::Playback || !vrMenu()) throw std::runtime_error("La poignée n’a pas ouvert les commandes.");
-                constexpr int timelineRow = 2;
-                const auto start = rayTo(.20f, timelineRow);
-                const auto end = rayTo(.74f, timelineRow);
+                vrCommand(VrCommand::Timeline);
+                if (page_ != VrPage::Timeline || !vrMenu() || !displayedFiles_.rows.empty())
+                    throw std::runtime_error("La gâchette n’a pas ouvert la barre flottante.");
+                const auto aimAtTimeline = [](float u) {
+                    const auto surface = VrUi::Surface::Timeline;
+                    const auto origin = XMVectorSet((u - .5f) * VrUi::surfaceWidth(surface), -.15f * VrUi::surfaceHeight(surface), 2, 0);
+                    return VrUi::aim(origin, XMVectorSet(0, 0, -1, 0), true, surface);
+                };
+                const auto start = aimAtTimeline(.20f), end = aimAtTimeline(.74f);
                 if (!end) throw std::runtime_error("Le pointeur de test ne touche pas la chronologie.");
                 vrPoint({start, true, VrUi::Trigger::Pressed});
                 vrPoint({end, false, VrUi::Trigger::Held});
@@ -356,8 +377,14 @@ public:
                 if (!waitFor([&] { return std::abs(media_->time() - expected) < .75; }, 2))
                     throw std::runtime_error("La lecture n’a pas rejoint la position choisie.");
                 vrPoint({start, true, VrUi::Trigger::Pressed});
-                vrCommand(VrCommand::PlaybackMenu);
-                if (page_ != VrPage::Hidden || timelineDrag_) throw std::runtime_error("La poignée n’a pas masqué le menu et annulé le glissement.");
+                vrCommand(VrCommand::Back);
+                if (page_ != VrPage::Hidden || timelineDrag_) throw std::runtime_error("B n’a pas masqué la barre et annulé le glissement.");
+                const auto resumeAt = media_->time();
+                media_.reset();
+                media_ = std::make_unique<Media>(renderer_->device(), true, resumeDirectory_);
+                load(initial);
+                if (!waitFor([&] { return media_->ready() && std::abs(media_->time() - resumeAt) < 1.; }, 4))
+                    throw std::runtime_error("La vidéo rouverte n’a pas repris à sa dernière position.");
             }
             vrCommand(VrCommand::Back);
             if (page_ != VrPage::Library) throw std::runtime_error("Le bouton B n’a pas rouvert la bibliothèque.");
@@ -435,7 +462,7 @@ private:
     UINT width_ = 0, height_ = 0;
     ViewSettings view_;
     VideoFormat detected_;
-    fs::path file_;
+    fs::path file_, resumeDirectory_;
     std::wstring vrError_, startupError_;
     float yaw_ = 0, pitch_ = 0, roll_ = 0;
     POINT drag_{};
@@ -955,18 +982,19 @@ private:
 
     void vrCommand(VrCommand input) {
         try {
-            if (timelineDrag_ && input != VrCommand::Back && input != VrCommand::PlaybackMenu) return;
+            if (timelineDrag_ && input != VrCommand::Back) return;
             switch (input) {
-            case VrCommand::PlaybackMenu:
-                if (!file_.empty()) {
+            case VrCommand::Timeline:
+                if (page_ == VrPage::Hidden && !file_.empty()) {
                     vrNotice_.clear();
-                    setPage(page_ == VrPage::Playback ? VrPage::Hidden : VrPage::Playback);
+                    setPage(VrPage::Timeline);
                 }
                 break;
             case VrCommand::Back:
                 vrNotice_.clear();
                 menuDirty_ = true;
-                if (page_ != VrPage::Library) setPage(VrPage::Library);
+                if (page_ == VrPage::Timeline) setPage(VrPage::Hidden);
+                else if (page_ != VrPage::Library) setPage(VrPage::Library);
                 else if (!library_.location().empty()) command(Up);
                 else if (media_->ready()) setPage(VrPage::Hidden);
                 break;
@@ -994,7 +1022,7 @@ private:
                 break;
             }
             case VrCommand::Select:
-                if (page_ == VrPage::Hidden) command(Play);
+                if (page_ == VrPage::Hidden || page_ == VrPage::Timeline) command(Play);
                 else {
                     const bool sources = page_ == VrPage::Library && sourceFocus_;
                     const auto rows = sources ? sourceRows() : vrRows();
@@ -1004,6 +1032,15 @@ private:
                 break;
             }
         } catch (const std::exception& failure) { vrFailure(failure); }
+    }
+
+    void beginTimelineDrag(float x) {
+        const auto duration = media_->duration();
+        if (std::isfinite(duration) && duration > 0.) {
+            timelineDrag_ = VrUi::timelinePosition(x);
+            vrNotice_.clear();
+            menuDirty_ = true;
+        }
     }
 
     void vrPoint(const VrUi::Pointer& event) {
@@ -1029,6 +1066,14 @@ private:
                 }
                 return;
             }
+            if (page_ == VrPage::Timeline) {
+                if (event.confirm && event.trigger == VrUi::Trigger::Idle) command(Play);
+                if (event.confirm && event.trigger == VrUi::Trigger::Pressed) {
+                    if (pointer && VrUi::hitsTimeline(pointer->x, pointer->y)) beginTimelineDrag(pointer->x);
+                    else setPage(VrPage::Hidden);
+                }
+                return;
+            }
             const bool library = page_ == VrPage::Library;
             const bool sources = library && pointer && pointer->x * VrUi::width < VrUi::sourcesRight;
             const auto& column = sources ? displayedSources_ : displayedFiles_;
@@ -1045,12 +1090,7 @@ private:
             if (event.confirm && hit >= 0) {
                 const auto row = column.rows[hit];
                 if (row.action == VrAction::Timeline && event.trigger == VrUi::Trigger::Pressed) {
-                    const auto duration = media_->duration();
-                    if (std::isfinite(duration) && duration > 0.) {
-                        timelineDrag_ = VrUi::timelinePosition(pointer->x);
-                        vrNotice_.clear();
-                        menuDirty_ = true;
-                    }
+                    beginTimelineDrag(pointer->x);
                 } else activateVrRow(row, pointer->x);
             } else if (event.confirm && !pointer && joystickFocus_) {
                 vrCommand(VrCommand::Select);
@@ -1061,7 +1101,8 @@ private:
     ID3D11ShaderResourceView* vrMenu() {
         if (page_ == VrPage::Hidden) return nullptr;
         const auto now = std::chrono::steady_clock::now();
-        const bool playback = page_ == VrPage::Playback;
+        const bool compact = page_ == VrPage::Timeline;
+        const bool playback = compact || page_ == VrPage::Playback;
         if (!menuDirty_ && (!playback || now < menuRefreshAt_)) return menuTexture_->get();
         const auto title = playback ? L"Commandes vidéo" : page_ == VrPage::Settings ? L"Réglages de lecture" : L"Bibliothèque";
         const bool library = page_ == VrPage::Library;
@@ -1070,7 +1111,11 @@ private:
         if (!vrNotice_.empty()) subtitle = vrNotice_;
         const double duration = playback ? media_->duration() : 0;
         const double progress = timelineDrag_.value_or(duration > 0 ? std::clamp(media_->time() / duration, 0., 1.) : 0.);
-        displayedFiles_.rows = vrRows();
+        if (compact) {
+            const double position = timelineDrag_ ? *timelineDrag_ * duration : media_->time();
+            subtitle = timeLabel(position) + L" / " + timeLabel(duration);
+        }
+        displayedFiles_.rows = compact ? std::vector<VrRow>{} : vrRows();
         displayedFiles_.selected = selected_;
         displayedSources_.rows = library ? sourceRows() : std::vector<VrRow>{};
         displayedSources_.selected = sourceSelected_;
@@ -1080,7 +1125,7 @@ private:
         displayedFiles_.highlighted = highlightSources ? -1 : highlighted;
         displayedSources_.highlighted = highlightSources ? highlighted : -1;
         menuTexture_->update(title, subtitle, displayedFiles_, library ? &displayedSources_ : nullptr,
-            progress, timelineDrag_.has_value(), playback);
+            progress, timelineDrag_.has_value(), playback, compact);
         displayedPage_ = page_;
         menuDirty_ = false;
         menuRefreshAt_ = now + std::chrono::milliseconds(250);
@@ -1145,7 +1190,10 @@ private:
         try {
             updateMedia();
             synchronized = vr_->frame(*renderer_, *media_, view_,
-                [&](auto input) { vrCommand(input); }, [&] { return page_ != VrPage::Hidden; },
+                [&](auto input) { vrCommand(input); }, [&] {
+                    if (page_ == VrPage::Hidden) return VrUi::Surface::None;
+                    return page_ == VrPage::Timeline ? VrUi::Surface::Timeline : VrUi::Surface::Full;
+                },
                 [&](const auto& pointer) { vrPoint(pointer); }, [&] { return vrMenu(); });
         } catch (const std::exception& error) {
             vr_->close();
@@ -1316,7 +1364,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 TestBookmarksFile bookmarks;
                 Player player(true, bookmarks.path);
                 player.run(instance, SW_HIDE, fs::absolute(options[1]), true);
-                writeDiagnostic(L"Tests sans affichage : favoris, commandes à la poignée, navigation et déplacement du curseur.");
+                writeDiagnostic(L"Tests sans affichage : favoris, barre flottante, déplacement du curseur et reprise de lecture.");
             } else if (options[0] == L"--inspect-format" && options.size() == 2 && fs::is_regular_file(options[1])) {
                 const auto format = detectFormat(options[1]);
                 std::wostringstream report;

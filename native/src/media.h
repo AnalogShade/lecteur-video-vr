@@ -6,7 +6,7 @@
 
 class Media {
 public:
-    explicit Media(ID3D11Device* device, bool silent = false);
+    explicit Media(ID3D11Device* device, bool silent = false, const fs::path& resumeDirectory = {});
     ~Media();
     void load(const fs::path& path);
     void tick();
@@ -24,6 +24,7 @@ public:
     ID3D11ShaderResourceView* image() const;
 
 private:
+    void savePosition() noexcept;
     struct State;
     std::unique_ptr<State> state_;
 };

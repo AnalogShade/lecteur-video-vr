@@ -42,20 +42,18 @@ struct Vr::State {
     XrAction select = XR_NULL_HANDLE, back = XR_NULL_HANDLE, center = XR_NULL_HANDLE;
     std::array<XrPath, 2> hands{};
     std::array<XrSpace, 2> grips{}, aims{};
-    std::array<bool, 2> triggerHeld{};
+    std::array<bool, 2> triggerHeld{}, gripHeld{};
     VrUi::ConfirmPress confirmPress;
-    VrUi::ConfirmPress menuPress;
     VrUi::FileGesture fileGesture;
     unsigned pointingHand = 1;
     int capturedPointer = -1;
     int capturedTrigger = -1;
-    bool releaseTriggerForPlayback = false;
     std::array<Swapchain, 2> eyes{};
     Swapchain menuSurface;
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     bool running = false;
     bool pendingCenter = true;
-    bool panelPlaced = false;
+    VrUi::Surface placedSurface = VrUi::Surface::None;
     XrPosef panel = identity;
     int grabbing = -1;
     int stickStep = 0;
@@ -97,7 +95,7 @@ struct Vr::State {
         gripPose = action("grip_pose", "Orientation de la manette", XR_ACTION_TYPE_POSE_INPUT);
         aimPose = action("point", "Pointer l’interface", XR_ACTION_TYPE_POSE_INPUT);
         trigger = action("trigger", "Confirmer ou saisir la vue", XR_ACTION_TYPE_FLOAT_INPUT);
-        squeeze = action("squeeze", "Afficher ou masquer les commandes vidéo", XR_ACTION_TYPE_FLOAT_INPUT);
+        squeeze = action("squeeze", "Orienter la vidéo ou changer de fichier", XR_ACTION_TYPE_FLOAT_INPUT);
         stick = action("navigate", "Naviguer", XR_ACTION_TYPE_VECTOR2F_INPUT);
         select = action("select", "Confirmer ou lire", XR_ACTION_TYPE_BOOLEAN_INPUT);
         back = action("back", "Précédent", XR_ACTION_TYPE_BOOLEAN_INPUT);
@@ -165,15 +163,14 @@ struct Vr::State {
         if (session) xrDestroySession(session);
         session = XR_NULL_HANDLE;
         running = false;
-        panelPlaced = false;
+        placedSurface = VrUi::Surface::None;
         triggerHeld.fill(false);
+        gripHeld.fill(false);
         confirmPress = {};
-        menuPress = {};
         fileGesture = {};
         pointingHand = 1;
         capturedPointer = -1;
         capturedTrigger = -1;
-        releaseTriggerForPlayback = false;
         grabbing = -1;
         stickStep = 0;
     }
@@ -223,8 +220,8 @@ struct Vr::State {
         return {swap.handle, {{0, 0}, {static_cast<int32_t>(swap.width), static_cast<int32_t>(swap.height)}}, 0};
     }
 
-    bool placePanel(XrTime time) {
-        if (panelPlaced) return true;
+    bool placePanel(XrTime time, VrUi::Surface surface) {
+        if (placedSurface == surface) return true;
         XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
         constexpr auto poseValid = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
         if (XR_FAILED(xrLocateSpace(viewer, local, time, &head)) || (head.locationFlags & poseValid) != poseValid) return false;
@@ -235,10 +232,11 @@ struct Vr::State {
         XMFLOAT4 orientation;
         XMFLOAT3 offset;
         XMStoreFloat4(&orientation, level);
-        XMStoreFloat3(&offset, XMVector3Rotate(XMVectorSet(0, -.12f, -2.f, 0), level));
+        const bool timeline = surface == VrUi::Surface::Timeline;
+        XMStoreFloat3(&offset, XMVector3Rotate(XMVectorSet(0, timeline ? -.49f : -.12f, -2.f, 0), level));
         panel.orientation = {orientation.x, orientation.y, orientation.z, orientation.w};
         panel.position = {head.pose.position.x + offset.x, head.pose.position.y + offset.y, head.pose.position.z + offset.z};
-        panelPlaced = true;
+        placedSurface = surface;
         return true;
     }
 
@@ -253,10 +251,10 @@ struct Vr::State {
             aim.pose.position.z - panel.position.z, 0);
         const auto direction = XMVector3Rotate(XMVectorSet(0, 0, -1, 0), XMLoadFloat4(&aimRotation));
         const auto inverse = XMQuaternionConjugate(XMLoadFloat4(&panelRotation));
-        return VrUi::aim(XMVector3Rotate(position, inverse), XMVector3Rotate(direction, inverse), insidePanel);
+        return VrUi::aim(XMVector3Rotate(position, inverse), XMVector3Rotate(direction, inverse), insidePanel, placedSurface);
     }
 
-    std::optional<XMFLOAT2> readCommands(XrTime time, ViewSettings& view, const std::function<bool()>& menuVisible,
+    std::optional<XMFLOAT2> readCommands(XrTime time, ViewSettings& view, const std::function<VrUi::Surface()>& surface,
                const std::function<void(VrCommand)>& invoke,
                const std::function<void(const VrUi::Pointer&)>& point) {
         XrActiveActionSet active{actions, XR_NULL_PATH};
@@ -268,8 +266,8 @@ struct Vr::State {
             grabbing = -1;
             stickStep = 0;
             triggerHeld.fill(true);
+            gripHeld.fill(true);
             confirmPress.requireRelease();
-            menuPress.requireRelease();
             fileGesture = {};
             capturedPointer = -1;
             capturedTrigger = -1;
@@ -296,8 +294,7 @@ struct Vr::State {
         XrVector2f axis{};
         int fileDirection = 0;
         bool horizontalHeld = false;
-        float gripPressure = 0.f;
-        std::array<bool, 2> confirmed{};
+        std::array<bool, 2> gripPressed{};
         bool selectHeld = false, selectPressed = false, backPressed = false;
         for (unsigned i = 0; i < hands.size(); ++i) {
             backPressed |= pressed(back, hands[i]);
@@ -311,82 +308,83 @@ struct Vr::State {
                 if (std::abs(joy.currentState.y) > std::abs(axis.y)) axis.y = joy.currentState.y;
                 if (std::abs(joy.currentState.x) > std::abs(axis.x)) axis.x = joy.currentState.x;
             }
-            gripPressure = std::max(gripPressure, pressure(squeeze, hands[i]));
-            const bool down = pressure(trigger, hands[i]) > (triggerHeld[i] ? .35f : .60f);
-            confirmed[i] = down && !triggerHeld[i];
-            triggerHeld[i] = down;
+            const bool gripDown = pressure(squeeze, hands[i]) > (gripHeld[i] ? .35f : .60f);
+            gripPressed[i] = gripDown && !gripHeld[i];
+            gripHeld[i] = gripDown;
+            triggerHeld[i] = pressure(trigger, hands[i]) > (triggerHeld[i] ? .35f : .60f);
             const auto x = joy.currentState.x, y = joy.currentState.y;
             if (joy.isActive && std::abs(x) > std::abs(y) && std::abs(x) > .60f) {
                 horizontalHeld = true;
-                if (down) fileDirection = x > 0 ? 1 : -1;
+                if (gripDown) fileDirection = x > 0 ? 1 : -1;
             }
         }
-        const bool activate = confirmPress.update(selectHeld, triggerHeld[0] || triggerHeld[1]);
-        const bool toggleMenu = menuPress.update(gripPressure);
-        if (toggleMenu) invoke(VrCommand::PlaybackMenu);
-        else if (backPressed) invoke(VrCommand::Back);
-        const bool menuOpen = menuVisible();
         const bool anyTriggerHeld = triggerHeld[0] || triggerHeld[1];
-        if (menuOpen || !anyTriggerHeld) releaseTriggerForPlayback = menuOpen && anyTriggerHeld;
-        const int changeFile = fileGesture.update(menuOpen || releaseTriggerForPlayback ? 0 : fileDirection, horizontalHeld);
+        const bool activate = confirmPress.update(selectHeld, anyTriggerHeld);
+        const bool openedTimeline = !backPressed && surface() == VrUi::Surface::None && activate && anyTriggerHeld;
+        if (backPressed) invoke(VrCommand::Back);
+        else if (openedTimeline) invoke(VrCommand::Timeline);
+        const auto current = surface();
+        const bool fullMenu = current == VrUi::Surface::Full;
+        const int changeFile = fileGesture.update(fullMenu ? 0 : fileDirection, horizontalHeld);
         const bool horizontal = std::abs(axis.x) > std::abs(axis.y);
-        const bool seeking = !menuOpen && horizontal;
-        const float direction = horizontal ? axis.x : menuOpen ? -axis.y : 0.f;
+        const bool seeking = !fullMenu && horizontal;
+        const float direction = horizontal ? axis.x : fullMenu ? -axis.y : 0.f;
         const int step = direction > .60f ? 1 : direction < -.60f ? -1 : 0;
-        const int gesture = menuOpen ? step * (horizontal ? 3 : 1) : step * 2;
+        const int gesture = fullMenu ? step * (horizontal ? 3 : 1) : step * 2;
         const auto now = std::chrono::steady_clock::now();
-        const bool changedMenu = toggleMenu || backPressed;
+        const bool changedMenu = openedTimeline || backPressed;
         if (changeFile && !changedMenu) invoke(changeFile < 0 ? VrCommand::PreviousFile : VrCommand::NextFile);
-        if (!changedMenu && gesture && (menuOpen || (!fileGesture.consumesSeek() && !releaseTriggerForPlayback)) &&
-            (gesture != stickStep || ((!menuOpen || !horizontal) && now >= repeatAt))) {
-            if (menuOpen && horizontal) invoke(step < 0 ? VrCommand::FocusSources : VrCommand::FocusFiles);
-            else if (menuOpen) invoke(step < 0 ? VrCommand::Previous : VrCommand::Next);
+        if (!changedMenu && gesture && (fullMenu || !fileGesture.consumesSeek()) &&
+            (gesture != stickStep || ((!fullMenu || !horizontal) && now >= repeatAt))) {
+            if (fullMenu && horizontal) invoke(step < 0 ? VrCommand::FocusSources : VrCommand::FocusFiles);
+            else if (fullMenu) invoke(step < 0 ? VrCommand::Previous : VrCommand::Next);
             else invoke(step < 0 ? VrCommand::Rewind : VrCommand::Advance);
-            const auto delay = menuOpen ? (gesture != stickStep ? 350 : 85) : 550;
+            const auto delay = fullMenu ? (gesture != stickStep ? 350 : 85) : 550;
             repeatAt = now + std::chrono::milliseconds(delay);
         }
         stickStep = gesture;
-        if (changedMenu) capturedPointer = capturedTrigger = -1;
-        if (menuOpen) {
-            grabbing = -1;
-            if (!placePanel(time)) return std::nullopt;
+        if (changedMenu || changeFile) capturedPointer = capturedTrigger = -1;
+        std::optional<XMFLOAT2> cursor;
+        const auto panelSurface = surface();
+        if (panelSurface != VrUi::Surface::None) {
+            if (!placePanel(time, panelSurface)) return std::nullopt;
             if (capturedPointer >= 0) {
                 const auto pointer = pointAtPanel(static_cast<unsigned>(capturedPointer), time, false);
                 const bool held = triggerHeld[capturedTrigger];
                 point({pointer, false, held ? VrUi::Trigger::Held : VrUi::Trigger::Released});
                 if (!held) capturedPointer = capturedTrigger = -1;
-                if (!pointer || pointer->x < 0 || pointer->x >= 1 || pointer->y < 0 || pointer->y >= 1) return std::nullopt;
-                return pointer;
+                if (pointer && pointer->x >= 0 && pointer->x < 1 && pointer->y >= 0 && pointer->y < 1) cursor = pointer;
+            } else {
+                cursor = pointAtPanel(pointingHand, time);
+                if (!cursor) {
+                    const unsigned other = 1 - pointingHand;
+                    cursor = pointAtPanel(other, time);
+                    if (cursor) pointingHand = other;
+                }
+                const bool confirm = activate && !changedMenu;
+                const bool triggerPress = confirm && anyTriggerHeld;
+                if (triggerPress && cursor) {
+                    capturedPointer = static_cast<int>(pointingHand);
+                    capturedTrigger = triggerHeld[pointingHand] ? capturedPointer : 1 - capturedPointer;
+                }
+                point({cursor, confirm, triggerPress ? VrUi::Trigger::Pressed : VrUi::Trigger::Idle});
             }
-            auto pointer = pointAtPanel(pointingHand, time);
-            if (!pointer) {
-                const unsigned other = 1 - pointingHand;
-                pointer = pointAtPanel(other, time);
-                if (pointer) pointingHand = other;
-            }
-            const bool confirm = activate && !changedMenu;
-            const bool capture = confirm && anyTriggerHeld && pointer.has_value();
-            if (capture) {
-                capturedPointer = static_cast<int>(pointingHand);
-                capturedTrigger = triggerHeld[pointingHand] ? capturedPointer : 1 - capturedPointer;
-            }
-            point({pointer, confirm, capture ? VrUi::Trigger::Pressed : VrUi::Trigger::Idle});
-            return pointer;
+        } else {
+            capturedPointer = capturedTrigger = -1;
+            if (selectPressed && !changedMenu && !changeFile) invoke(VrCommand::Select);
+            placedSurface = VrUi::Surface::None;
         }
-        capturedPointer = capturedTrigger = -1;
-        if (selectPressed && !changedMenu) invoke(VrCommand::Select);
-        panelPlaced = false;
-        if (changedMenu || fileGesture.consumesSeek() || releaseTriggerForPlayback) { grabbing = -1; return std::nullopt; }
+        if (fullMenu || changedMenu || fileGesture.consumesSeek()) { grabbing = -1; return cursor; }
         if (!seeking && std::abs(axis.y) > .30f)
             view.zoom = std::clamp(view.zoom * std::exp(axis.y * .012f), .3f, 3.f);
-        if (grabbing >= 0 && !triggerHeld[grabbing]) grabbing = -1;
+        if (grabbing >= 0 && !gripHeld[grabbing]) grabbing = -1;
         int hand = grabbing;
-        if (hand < 0) for (int i = 0; i < 2; ++i) if (confirmed[i]) { hand = i; break; }
-        if (hand < 0) return std::nullopt;
+        if (hand < 0) for (int i = 0; i < 2; ++i) if (gripPressed[i]) { hand = i; break; }
+        if (hand < 0) return cursor;
 
         XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
         if (XR_FAILED(xrLocateSpace(grips[hand], local, time, &location)) ||
-            !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) { grabbing = -1; return std::nullopt; }
+            !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) { grabbing = -1; return cursor; }
         const auto next = rotation(location.pose.orientation);
         if (grabbing < 0) {
             grabbing = hand;
@@ -396,7 +394,7 @@ struct Vr::State {
             auto delta = XMQuaternionMultiply(XMQuaternionInverse(XMLoadFloat4(&startHand)), XMLoadFloat4(&next));
             XMStoreFloat4(&orientation, XMQuaternionNormalize(XMQuaternionMultiply(XMLoadFloat4(&startView), delta)));
         }
-        return std::nullopt;
+        return cursor;
     }
 };
 
@@ -424,7 +422,7 @@ Vr::~Vr() = default;
 const LUID& Vr::adapter() const { return state_->requirements.adapterLuid; }
 bool Vr::active() const { return state_->session != XR_NULL_HANDLE; }
 void Vr::close() { state_->close(); }
-void Vr::recenter() { state_->pendingCenter = true; state_->panelPlaced = false; state_->grabbing = -1; }
+void Vr::recenter() { state_->pendingCenter = true; state_->placedSurface = VrUi::Surface::None; state_->grabbing = -1; }
 
 std::string Vr::runtime() const {
     XrInstanceProperties properties{XR_TYPE_INSTANCE_PROPERTIES};
@@ -480,7 +478,7 @@ void Vr::start(Renderer& renderer) {
 }
 
 bool Vr::frame(Renderer& renderer, const Media& media, ViewSettings& view,
-               const std::function<void(VrCommand)>& input, const std::function<bool()>& menuVisible,
+               const std::function<void(VrCommand)>& input, const std::function<VrUi::Surface()>& surface,
                const std::function<void(const VrUi::Pointer&)>& point,
                const std::function<ID3D11ShaderResourceView*()>& menu) {
     auto& s = *state_;
@@ -518,7 +516,7 @@ bool Vr::frame(Renderer& renderer, const Media& media, ViewSettings& view,
                     XMStoreFloat4(&s.orientation, XMQuaternionRotationRollPitchYaw(0, heading, 0));
                     s.pendingCenter = false;
                 }
-                const auto pointer = s.readCommands(frame.predictedDisplayTime, view, menuVisible, input, point);
+                auto pointer = s.readCommands(frame.predictedDisplayTime, view, surface, input, point);
                 const bool srgb = s.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || s.format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
                 for (unsigned i = 0; i < count; ++i) {
                     const auto& eye = eyes[i];
@@ -534,18 +532,22 @@ bool Vr::frame(Renderer& renderer, const Media& media, ViewSettings& view,
                 projection.viewCount = count;
                 projection.views = projectionViews.data();
                 layers[end.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
-                if (auto* texture = menuVisible() && s.placePanel(frame.predictedDisplayTime) ? menu() : nullptr) {
+                const auto current = surface();
+                if (auto* texture = current != VrUi::Surface::None && s.placePanel(frame.predictedDisplayTime, current) ? menu() : nullptr) {
+                    const auto height = VrUi::surfacePixels(current);
+                    if (pointer) pointer->y *= static_cast<float>(height) / VrUi::height;
                     s.render(s.menuSurface, [&](auto* target) {
                         renderer.blit(target, VrUi::width, VrUi::height, texture, srgb, pointer ? &*pointer : nullptr);
                     });
                     overlay.space = s.local;
                     overlay.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
                     overlay.subImage = s.subImage(s.menuSurface);
+                    overlay.subImage.imageRect.extent.height = height;
                     overlay.pose = s.panel;
-                    overlay.size = {VrUi::panelWidth, VrUi::panelHeight};
+                    overlay.size = {VrUi::surfaceWidth(current), VrUi::surfaceHeight(current)};
                     layers[end.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&overlay);
                 }
-                if (!menuVisible()) s.panelPlaced = false;
+                if (current == VrUi::Surface::None) s.placedSurface = VrUi::Surface::None;
             }
         }
     } catch (...) {

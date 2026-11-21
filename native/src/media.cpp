@@ -2,6 +2,8 @@
 #include <mpv/render_d3d11.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 
 namespace {
 template<class Function>
@@ -22,6 +24,8 @@ struct Media::State {
     ComPtr<ID3D11ShaderResourceView> srv;
     std::atomic<bool> changed{true};
     bool frame = false;
+    bool resume = false;
+    std::chrono::steady_clock::time_point nextPositionSave{};
     int width = 0, height = 0;
     std::wstring message;
 
@@ -86,7 +90,7 @@ struct Media::State {
     }
 };
 
-Media::Media(ID3D11Device* device, bool silent) : state_(std::make_unique<State>()) {
+Media::Media(ID3D11Device* device, bool silent, const fs::path& resumeDirectory) : state_(std::make_unique<State>()) {
     auto& s = *state_;
     s.dll = LoadLibraryExW(L"libmpv-2.dll", nullptr, LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!s.dll) throw std::runtime_error("libmpv-2.dll doit se trouver à côté de LecteurVideoVR.exe.");
@@ -112,6 +116,13 @@ Media::Media(ID3D11Device* device, bool silent) : state_(std::make_unique<State>
     if (!s.player) throw std::runtime_error("Impossible de créer le lecteur vidéo.");
     const auto option = [&](const char* key, const char* value) { s.check(s.mpv_set_option_string(s.player, key, value)); };
     option("config", "no");
+    s.resume = !resumeDirectory.empty();
+    option("resume-playback", s.resume ? "yes" : "no");
+    if (s.resume) {
+        option("watch-later-dir", resumeDirectory.u8string().c_str());
+        option("watch-later-options", "start");
+        option("resume-playback-check-mtime", "yes");
+    }
     option("ytdl", "no");
     option("load-scripts", "no");
     option("vo", "libmpv");
@@ -131,12 +142,25 @@ Media::Media(ID3D11Device* device, bool silent) : state_(std::make_unique<State>
     }, &s);
 }
 
-Media::~Media() = default;
+Media::~Media() { savePosition(); }
+
+void Media::savePosition() noexcept {
+    auto& s = *state_;
+    if (!s.resume || !s.frame || !s.message.empty()) return;
+    const auto length = duration(), position = time();
+    if (!std::isfinite(length) || !std::isfinite(position) || length <= 0) return;
+    const bool completed = s.property<int>("eof-reached", MPV_FORMAT_FLAG) != 0 ||
+        position >= length - std::min(.8, length * .03);
+    const char* command[] = {completed || position < .25 ? "delete-watch-later-config" : "write-watch-later-config", nullptr};
+    s.mpv_command(s.player, command);
+}
 
 void Media::load(const fs::path& path) {
     auto& s = *state_;
     if (!fs::is_regular_file(path)) throw std::runtime_error("Ce fichier local est introuvable.");
+    savePosition();
     s.frame = false;
+    s.nextPositionSave = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     s.message.clear();
     s.command("loadfile", path.u8string().c_str(), "replace");
     s.check(s.mpv_set_property_string(s.player, "pause", "no"));
@@ -163,6 +187,11 @@ void Media::tick() {
     s.context->ClearState();
     s.check(s.mpv_render_context_render(s.render, params));
     s.frame = true;
+    const auto now = std::chrono::steady_clock::now();
+    if (s.resume && now >= s.nextPositionSave) {
+        savePosition();
+        s.nextPositionSave = now + std::chrono::seconds(10);
+    }
 }
 
 void Media::togglePause() { state_->command("cycle", "pause"); }

@@ -16,6 +16,17 @@ constexpr int sourcesRight = 286;
 constexpr int filesLeft = 308;
 constexpr float panelWidth = 1.72f;
 constexpr float panelHeight = panelWidth * height / width;
+constexpr int timelineHeight = 132;
+constexpr float timelineWidth = 1.45f;
+enum class Surface { None, Full, Timeline };
+
+inline float surfaceWidth(Surface surface) { return surface == Surface::Timeline ? timelineWidth : panelWidth; }
+inline int surfacePixels(Surface surface) { return surface == Surface::Timeline ? timelineHeight : height; }
+inline float surfaceHeight(Surface surface) { return surfaceWidth(surface) * surfacePixels(surface) / width; }
+
+inline bool hitsTimeline(float u, float v) {
+    return u * width >= margin && u * width < width - margin && v >= .35f && v < 1.f;
+}
 
 enum class Trigger { Idle, Pressed, Held, Released, Cancelled };
 
@@ -38,8 +49,6 @@ public:
         held_ = down;
         return pressed;
     }
-
-    bool update(float pressure) { return update(pressure > (held_ ? .35f : .60f), false); }
 
     void requireRelease() { held_ = true; }
 
@@ -75,11 +84,12 @@ inline int hitRow(float u, float v, int count, int selected, int left = margin, 
     return index < count && y - row * rowStep < rowHeight ? index : -1;
 }
 
-inline std::optional<XMFLOAT2> aim(FXMVECTOR origin, FXMVECTOR direction, bool insidePanel = true) {
+inline std::optional<XMFLOAT2> aim(FXMVECTOR origin, FXMVECTOR direction, bool insidePanel = true,
+                                  Surface surface = Surface::Full) {
     const float z = XMVectorGetZ(direction);
     if (XMVectorGetZ(origin) <= 0.f || z >= -.0001f) return std::nullopt;
     const auto hit = XMVectorMultiplyAdd(direction, XMVectorReplicate(-XMVectorGetZ(origin) / z), origin);
-    const XMFLOAT2 uv{.5f + XMVectorGetX(hit) / panelWidth, .5f - XMVectorGetY(hit) / panelHeight};
+    const XMFLOAT2 uv{.5f + XMVectorGetX(hit) / surfaceWidth(surface), .5f - XMVectorGetY(hit) / surfaceHeight(surface)};
     if (insidePanel && (uv.x < 0 || uv.x >= 1 || uv.y < 0 || uv.y >= 1)) return std::nullopt;
     return uv;
 }

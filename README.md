@@ -16,11 +16,11 @@ Si le Rift est en train de démarrer, le lecteur réessaie pendant 30 secondes. 
 | Commande | Action |
 | --- | --- |
 | Pointer et appuyer sur la gâchette ou sur **A** dans un menu | Confirme l’élément surligné en une seule action. |
-| Appuyer sur la gâchette latérale de la poignée | Affiche ou masque les commandes vidéo. |
+| Appuyer sur la gâchette sous l’index pendant la lecture | Affiche une petite barre de lecture flottante. Appuie à côté de la barre ou utilise **B** pour la fermer. |
 | Pointer le curseur de lecture et maintenir la gâchette sous l’index | Fais glisser le curseur, puis relâche pour aller au moment choisi. |
-| Maintenir la gâchette sous l’index, tourner ou incliner la manette, puis relâcher pendant la lecture | Oriente la vidéo et conserve l’angle choisi. |
+| Maintenir la gâchette latérale de la poignée, tourner ou incliner la manette, puis relâcher | Oriente la vidéo et conserve l’angle choisi. |
 | Joystick gauche ou droite pendant la lecture | Recule ou avance de 10 secondes. Maintenir répète le saut. |
-| Gâchette maintenue + joystick gauche ou droite sur la même manette | Ouvre la vidéo précédente ou suivante dans le dossier. Ramène le joystick au centre avant de changer de vidéo à nouveau. |
+| Gâchette latérale maintenue + joystick gauche ou droite sur la même manette | Ouvre la vidéo précédente ou suivante dans le dossier. Ramène le joystick au centre avant de changer de vidéo à nouveau. |
 | Joystick haut ou bas pendant la lecture | Rapproche ou éloigne l’image. |
 | Appuyer sur le joystick | Recentre la vue et le menu, et rétablit le zoom. |
 | **B** ou **Y** | Revient au dossier parent ou à l’écran précédent. Depuis la vidéo, revient à la bibliothèque. |
@@ -30,6 +30,8 @@ Si le Rift est en train de démarrer, le lecteur réessaie pendant 30 secondes. 
 La bibliothèque VR affiche les disques montés par Windows. Dans un dossier, **Ajouter ce dossier aux favoris** enregistre son emplacement et l’affiche dans la colonne de gauche. Le même bouton permet de le retirer. Les favoris sont conservés après la fermeture du lecteur.
 
 Les **Commandes vidéo** donnent accès à la barre de progression, au volume et aux vidéos précédente et suivante du dossier. Dans **Réglages de lecture**, tu peux réappliquer le mode automatique, changer la projection et la stéréo, inverser les yeux, régler le champ ou la convergence 3D et quitter le lecteur.
+
+Le lecteur enregistre la position des vidéos sur ce PC. Quand tu rouvres une vidéo, elle reprend au dernier point enregistré. Une vidéo terminée repart du début.
 
 ### Projections et fichiers
 
