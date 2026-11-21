@@ -1,0 +1,4 @@
+node_modules/
+dist/
+native/.deps/
+native/bin/

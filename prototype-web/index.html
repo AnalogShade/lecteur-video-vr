@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11131b">
+  <title>Prototype WebXR archivé</title>
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="icon" href="data:,">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Prototype WebXR archivé, accueil">
+      <span class="brand-icon"><i data-lucide="glasses"></i></span>
+      <span>Prototype WebXR archivé</span>
+    </a>
+    <div class="top-actions">
+      <button class="button secondary" id="open" aria-label="Ouvrir des vidéos"><i data-lucide="folder-open"></i><span>Ouvrir des vidéos</span></button>
+      <button class="button primary" id="vr" disabled><i data-lucide="headset"></i><span>Entrer en VR</span></button>
+    </div>
+  </header>
+
+  <main>
+    <section class="player" aria-label="Lecteur vidéo">
+      <div class="screen" id="screen">
+        <div class="render" id="render"></div>
+        <div class="empty" id="empty">
+          <div class="empty-icon"><i data-lucide="film"></i></div>
+          <h1>Ouvre une vidéo</h1>
+          <p>Glisse un fichier ici ou sélectionne-le sur ton appareil.</p>
+          <button class="button primary" id="empty-open"><i data-lucide="plus"></i> Choisir un fichier</button>
+        </div>
+        <div class="screen-hint" id="screen-hint" hidden><i data-lucide="move"></i> Glisse pour regarder autour</div>
+      </div>
+      <div class="controls">
+        <input id="seek" class="seek" type="range" min="0" max="1" value="0" step="0.01" aria-label="Position dans la vidéo" disabled>
+        <div class="transport">
+          <button id="play" class="icon-button play" title="Lire" aria-label="Lire" disabled><i data-lucide="play"></i><i data-lucide="pause" hidden></i></button>
+          <button id="back" class="icon-button jump" title="Reculer de 10 secondes" aria-label="Reculer de 10 secondes" disabled><i data-lucide="rotate-ccw"></i><span>10</span></button>
+          <button id="forward" class="icon-button jump" title="Avancer de 10 secondes" aria-label="Avancer de 10 secondes" disabled><i data-lucide="rotate-cw"></i><span>10</span></button>
+          <span class="time"><span id="elapsed">0:00</span><span class="time-divider"> / </span><span id="duration">0:00</span></span>
+          <div class="spacer"></div>
+          <button id="mute" class="icon-button" title="Couper le son" aria-label="Couper le son"><i data-lucide="volume-2"></i><i data-lucide="volume-x" hidden></i></button>
+          <input id="volume" type="range" class="volume" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+          <button id="reset" class="icon-button" title="Recentrer la vue" aria-label="Recentrer la vue" disabled><i data-lucide="scan-line"></i></button>
+          <button id="fullscreen" class="icon-button" title="Plein écran" aria-label="Plein écran"><i data-lucide="maximize"></i></button>
+        </div>
+      </div>
+    </section>
+
+    <aside>
+      <section class="panel">
+        <h2><i data-lucide="sliders-horizontal"></i> Affichage</h2>
+        <fieldset>
+          <legend>Projection</legend>
+          <div class="segmented" id="projection">
+            <button type="button" data-value="flat" aria-pressed="true">Écran plat</button>
+            <button type="button" data-value="180" aria-pressed="false">VR 180°</button>
+            <button type="button" data-value="360" aria-pressed="false">VR 360°</button>
+          </div>
+        </fieldset>
+        <label class="field" for="stereo">Disposition des images</label>
+        <select id="stereo">
+          <option value="mono">Mono</option>
+          <option value="sbs">3D côte à côte (SBS)</option>
+          <option value="tb">3D haut / bas (TB)</option>
+        </select>
+        <label class="check"><input id="swap" type="checkbox" disabled> Inverser les yeux</label>
+      </section>
+
+      <section class="panel queue">
+        <div class="queue-heading"><h2><i data-lucide="list-video"></i> File de lecture</h2><span id="count" class="count">0</span></div>
+        <p id="queue-empty">Les vidéos ouvertes apparaissent ici.</p>
+        <ol id="queue"></ol>
+      </section>
+      <p class="status" id="status" role="status"><i data-lucide="shield-check"></i><span>Les vidéos locales restent sur ton appareil.</span></p>
+    </aside>
+  </main>
+  <input type="file" id="files" accept="video/*,.m4v,.mkv,.avi,.mov,.webm,.mp4,.ogv,.mpeg,.mpg" multiple hidden>
+  <video id="media" playsinline preload="metadata" hidden></video>
+  <footer><span id="xr-status" role="status">Vérification de la disponibilité de WebXR…</span></footer>
+</body>
+</html>

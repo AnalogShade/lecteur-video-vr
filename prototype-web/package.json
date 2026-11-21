@@ -1,0 +1,18 @@
+{
+  "name": "horizon-vr-player",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "lucide": "1.77.0",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
