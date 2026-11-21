@@ -517,12 +517,19 @@ bool Vr::frame(Renderer& renderer, const Media& media, ViewSettings& view,
                     s.pendingCenter = false;
                 }
                 auto pointer = s.readCommands(frame.predictedDisplayTime, view, surface, input, point);
+                const auto current = surface();
+                const bool panelPlaced = current != VrUi::Surface::None && s.placePanel(frame.predictedDisplayTime, current);
                 const bool srgb = s.format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || s.format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
                 for (unsigned i = 0; i < count; ++i) {
                     const auto& eye = eyes[i];
                     auto& swap = s.eyes[i];
-                    const Camera camera{rotation(eye.pose.orientation), std::tan(eye.fov.angleLeft),
+                    Camera camera{rotation(eye.pose.orientation), std::tan(eye.fov.angleLeft),
                         std::tan(eye.fov.angleRight), std::tan(eye.fov.angleDown), std::tan(eye.fov.angleUp)};
+                    if (panelPlaced && (state.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)) {
+                        camera.gridEye = {eye.pose.position.x - s.panel.position.x,
+                            std::max(.15f, eye.pose.position.y - s.panel.position.y + 1.05f),
+                            eye.pose.position.z - s.panel.position.z};
+                    }
                     s.render(swap, [&](auto* target) {
                         renderer.draw(target, swap.width, swap.height, camera, media, view, s.orientation, i, srgb);
                     });
@@ -532,8 +539,7 @@ bool Vr::frame(Renderer& renderer, const Media& media, ViewSettings& view,
                 projection.viewCount = count;
                 projection.views = projectionViews.data();
                 layers[end.layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection);
-                const auto current = surface();
-                if (auto* texture = current != VrUi::Surface::None && s.placePanel(frame.predictedDisplayTime, current) ? menu() : nullptr) {
+                if (auto* texture = panelPlaced ? menu() : nullptr) {
                     const auto height = VrUi::surfacePixels(current);
                     if (pointer) pointer->y *= static_cast<float>(height) / VrUi::height;
                     s.render(s.menuSurface, [&](auto* target) {

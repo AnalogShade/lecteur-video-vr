@@ -6,6 +6,7 @@
 struct Camera {
     XMFLOAT4 rotation{0, 0, 0, 1};
     float left = -1, right = 1, bottom = -0.56f, top = 0.56f;
+    XMFLOAT3 gridEye{0, 1.15f, 0};
 };
 
 class Renderer {

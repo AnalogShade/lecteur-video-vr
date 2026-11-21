@@ -2,8 +2,10 @@
 #include "vr-ui.h"
 #include "video-format.h"
 #include "stereo-probe.h"
+#include "ui-theme.h"
 #include <commctrl.h>
 #include <dbt.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <algorithm>
@@ -16,14 +18,12 @@
 #include <windowsx.h>
 
 namespace {
-constexpr COLORREF background = RGB(16, 17, 24);
-constexpr COLORREF panelColor = RGB(26, 28, 41);
-constexpr COLORREF textColor = RGB(239, 238, 252);
-constexpr COLORREF muted = RGB(166, 168, 192);
-constexpr COLORREF accent = RGB(181, 163, 255);
+using namespace UiTheme;
 constexpr wchar_t windowClass[] = L"LecteurVideoVR";
 constexpr wchar_t previewClass[] = L"LecteurVideoVRApercu";
 constexpr wchar_t appName[] = L"Lecteur vidéo VR";
+// Windows 11 caption attributes, also used when building against an older SDK.
+constexpr DWORD dwmDarkMode = 20, dwmBorderColor = 34, dwmCaptionColor = 35, dwmTextColor = 36;
 constexpr int projectionCount = 5;
 constexpr int stereoCount = 3;
 constexpr int shortcutsInLibrary = 6;
@@ -40,6 +40,7 @@ struct VrRow {
     std::wstring label;
     VrAction action;
     int entry = -1;
+    bool active = false;
 };
 
 struct VrColumn {
@@ -76,12 +77,6 @@ enum Id {
     SwapEyes, ZoomDown, ZoomUp, Center, Play, Back, Forward, Mute, EnterVr, Seek, Volume,
     Narrow, Widen, DepthDown, DepthUp,
 };
-
-void fill(HDC dc, RECT rect, COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
-    FillRect(dc, &rect, brush);
-    DeleteObject(brush);
-}
 
 std::wstring timeLabel(double seconds) {
     const auto time = static_cast<int>(std::max(0., seconds));
@@ -130,6 +125,7 @@ public:
         int volume;
         bool muted;
         bool dragging;
+        bool muteFocused;
     };
 
     void update(const std::wstring& title, const std::wstring& subtitle, const VrColumn& files,
@@ -149,28 +145,28 @@ public:
         HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
         if (!bitmap) { DeleteDC(dc); throw std::runtime_error("Image du menu VR introuvable."); }
         auto oldBitmap = SelectObject(dc, bitmap);
-        auto font = CreateFontW(-26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-        auto oldFont = SelectObject(dc, font);
+        auto bodyFont = font(-26, FW_NORMAL, L"Segoe UI");
+        auto titleFont = font(compact ? -30 : -34, FW_SEMIBOLD);
+        auto captionFont = font(-22, FW_MEDIUM);
+        auto oldFont = SelectObject(dc, bodyFont);
         SetBkMode(dc, TRANSPARENT);
-        fill(dc, {0, 0, VrUi::width, compact ? VrUi::timelineHeight : VrUi::height}, background);
-        if (!compact) fill(dc, {0, 0, VrUi::width, 7}, accent);
+        const int bottom = compact ? VrUi::timelineHeight : VrUi::height;
+        fill(dc, {0, 0, VrUi::width, VrUi::height}, background);
+        gradient(dc, {0, 0, VrUi::width, bottom}, raised, background);
+        outline(dc, {0, 0, VrUi::width, bottom}, violet);
+        rule(dc, 0, VrUi::width, 0, 3);
         const auto line = [&](const std::wstring& text, int top, COLORREF color, int left = 32, int right = VrUi::width - 28) {
             RECT bounds{left, top, right, top + 38};
             SetTextColor(dc, color);
             DrawTextW(dc, text.c_str(), -1, &bounds, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | DT_VCENTER);
         };
-        const auto drawTrack = [&](int x1, int x2, int y, double fraction, bool active) {
+        const auto drawTrack = [&](int x1, int x2, int y, double fraction, bool active, COLORREF color) {
             const int handle = x1 + static_cast<int>((x2 - x1) * fraction);
-            fill(dc, {x1, y - 3, x2, y + 3}, RGB(78, 77, 103));
-            fill(dc, {x1, y - 3, handle, y + 3}, accent);
-            auto oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-            auto oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
-            SetDCBrushColor(dc, active ? RGB(255, 239, 255) : accent);
-            const int radius = active ? 11 : 8;
-            Ellipse(dc, handle - radius, y - radius, handle + radius, y + radius);
-            SelectObject(dc, oldBrush);
-            SelectObject(dc, oldPen);
+            fill(dc, {x1, y - 4, x2, y + 4}, track);
+            fill(dc, {x1, y - 2, handle, y + 2}, color);
+            const int radius = active ? 9 : 6;
+            fill(dc, {handle - radius, y - radius, handle + radius, y + radius}, color);
+            fill(dc, {handle - 2, y - radius + 2, handle + 2, y + radius - 2}, textColor);
         };
         const auto draw = [&](const VrColumn& column, int left, int right) {
             const int count = static_cast<int>(column.rows.size());
@@ -179,40 +175,51 @@ public:
                 const auto& row = column.rows[i];
                 const int y = VrUi::firstY + (i - first) * VrUi::rowStep;
                 const bool highlighted = i == column.highlighted;
-                fill(dc, {left, y, right, y + VrUi::rowHeight}, highlighted ? RGB(73, 53, 118) : panelColor);
-                if (highlighted) fill(dc, {left, y, left + 4, y + VrUi::rowHeight}, accent);
+                tile(dc, {left, y, right, y + VrUi::rowHeight}, highlighted, row.active);
                 if (row.action == VrAction::Timeline) {
                     const int start = left + 18, end = right - 18;
-                    drawTrack(start, end, y + 32, progress, dragging);
+                    drawTrack(start, end, y + 32, progress, dragging, accent);
+                    SelectObject(dc, captionFont);
                     line(row.label, y - 4, textColor, start, end);
+                    SelectObject(dc, bodyFont);
                 } else {
-                    line(row.label, y, highlighted ? RGB(249, 243, 255) : textColor, left + 16, right - 12);
+                    line(row.label, y, textColor, left + 16, right - 12);
                 }
             }
         };
         if (audio) {
             const int left = VrUi::timelineTrackStart, right = VrUi::width - left;
-            line(subtitle, 14, textColor, left);
-            drawTrack(left, right, VrUi::timelineTrackY, progress, dragging);
-            fill(dc, {left, 121, right, 123}, panelColor);
+            SelectObject(dc, titleFont);
+            line(title, 16, textColor, left);
+            RECT time{left, 16, right, 54};
+            SetTextColor(dc, accent);
+            DrawTextW(dc, subtitle.c_str(), -1, &time, DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            SelectObject(dc, bodyFont);
+            drawTrack(left, right, VrUi::timelineTrackY, progress, dragging, accent);
+            rule(dc, left, right, 119);
             line(L"Volume " + std::to_wstring(audio->volume) + L" %", VrUi::volumeTrackY - 19,
                 textColor, left, VrUi::volumeTrackStart - 16);
             drawTrack(VrUi::volumeTrackStart, VrUi::volumeTrackEnd, VrUi::volumeTrackY,
-                audio->volume / 100., audio->dragging);
-            fill(dc, {VrUi::muteLeft, VrUi::muteTop, VrUi::muteRight, VrUi::muteBottom},
-                audio->muted ? RGB(73, 53, 118) : panelColor);
+                audio->volume / 100., audio->dragging, violet);
+            tile(dc, {VrUi::muteLeft, VrUi::muteTop, VrUi::muteRight, VrUi::muteBottom},
+                audio->muteFocused, audio->muted);
             line(audio->muted ? L"Rétablir le son" : L"Sourdine", VrUi::volumeTrackY - 19,
                 textColor, VrUi::muteLeft + 12, VrUi::muteRight - 8);
         } else {
-            line(title, 17, textColor);
+            SelectObject(dc, titleFont);
+            line(title, 14, textColor);
+            rule(dc, VrUi::margin, VrUi::width - VrUi::margin, 57);
+            SelectObject(dc, bodyFont);
             const int filesStart = sources ? VrUi::filesLeft : VrUi::margin;
             if (sources) {
-                fill(dc, {VrUi::margin, 60, VrUi::sourcesRight, 522}, RGB(21, 22, 33));
+                fill(dc, {VrUi::margin, 103, VrUi::sourcesRight, 522}, background);
                 line(L"Disques et favoris", 60, accent, VrUi::margin + 12, VrUi::sourcesRight - 10);
                 draw(*sources, VrUi::margin, VrUi::sourcesRight);
             }
             line(subtitle, 60, muted, filesStart + 12);
             draw(files, filesStart, VrUi::width - VrUi::margin);
+            rule(dc, VrUi::margin, VrUi::width - VrUi::margin, 536);
+            SelectObject(dc, captionFont);
             line(dragging ? L"Relâche la gâchette pour reprendre à cet endroit"
                 : playback ? L"Gâchette maintenue : déplacer le curseur   ·   B : retour"
                 : L"Pointe et confirme avec la gâchette ou A     B : retour", 547, accent);
@@ -221,7 +228,9 @@ public:
         context_->UpdateSubresource(texture_.Get(), 0, nullptr, pixels, VrUi::width * 4, 0);
         SelectObject(dc, oldFont);
         SelectObject(dc, oldBitmap);
-        DeleteObject(font);
+        DeleteObject(bodyFont);
+        DeleteObject(titleFont);
+        DeleteObject(captionFont);
         DeleteObject(bitmap);
         DeleteDC(dc);
     }
@@ -247,7 +256,10 @@ public:
     ~Player() {
         if (vr_) vr_->close();
         if (font_) DeleteObject(font_);
+        if (buttonFont_) DeleteObject(buttonFont_);
+        if (headingFont_) DeleteObject(headingFont_);
         if (brush_) DeleteObject(brush_);
+        if (panelBrush_) DeleteObject(panelBrush_);
     }
 
     static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
@@ -511,8 +523,8 @@ public:
 private:
     HWND window_ = nullptr, preview_ = nullptr, title_ = nullptr, location_ = nullptr, name_ = nullptr, status_ = nullptr;
     HWND clock_ = nullptr, geometry_ = nullptr;
-    HFONT font_ = nullptr;
-    HBRUSH brush_ = nullptr;
+    HFONT font_ = nullptr, buttonFont_ = nullptr, headingFont_ = nullptr;
+    HBRUSH brush_ = nullptr, panelBrush_ = nullptr;
     Library library_;
     std::unique_ptr<Vr> vr_;
     std::unique_ptr<Renderer> renderer_;
@@ -534,7 +546,7 @@ private:
     VrPage displayedPage_ = VrPage::Hidden;
     VrColumn displayedFiles_, displayedSources_;
     std::optional<double> timelineDrag_;
-    bool volumeDrag_ = false;
+    bool volumeDrag_ = false, muteFocused_ = false;
     bool sourceFocus_ = true, joystickFocus_ = false, pointedSource_ = false;
     int selected_ = 0, sourceSelected_ = 0, pointedRow_ = -1, librarySelection_ = 0, volume_ = 100;
     unsigned stereoSamples_ = 0;
@@ -554,10 +566,18 @@ private:
     }
 
     void create() {
-        font_ = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        font_ = font(-17, FW_NORMAL, L"Segoe UI");
+        buttonFont_ = font(-16, FW_NORMAL, L"Segoe UI");
+        headingFont_ = font(-24, FW_SEMIBOLD);
         brush_ = CreateSolidBrush(background);
+        panelBrush_ = CreateSolidBrush(panelColor);
+        const BOOL darkCaption = TRUE;
+        DwmSetWindowAttribute(window_, dwmDarkMode, &darkCaption, sizeof(darkCaption));
+        DwmSetWindowAttribute(window_, dwmCaptionColor, &background, sizeof(background));
+        DwmSetWindowAttribute(window_, dwmTextColor, &textColor, sizeof(textColor));
+        DwmSetWindowAttribute(window_, dwmBorderColor, &edge, sizeof(edge));
         title_ = control(L"STATIC", appName, SS_LEFT);
+        SendMessageW(title_, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), FALSE);
         location_ = control(L"STATIC", L"", SS_PATHELLIPSIS);
         name_ = control(L"STATIC", L"Ouvre un fichier ou choisis un disque", SS_ENDELLIPSIS);
         status_ = control(L"STATIC", L"", SS_ENDELLIPSIS);
@@ -569,11 +589,19 @@ private:
             {ZoomDown, L"−"}, {ZoomUp, L"+"}, {Center, L"Recentrer"}, {Play, L"Lire / Pause"},
             {Back, L"−10 s"}, {Forward, L"+10 s"}, {Mute, L"Son"}, {EnterVr, L"Entrer en VR"},
             {Narrow, L"Champ −"}, {Widen, L"Champ +"}, {DepthDown, L"3D −"}, {DepthUp, L"3D +"},
-        }) control(L"BUTTON", entry.second, WS_TABSTOP | BS_PUSHBUTTON, entry.first);
-        control(L"BUTTON", L"Inverser les yeux", WS_TABSTOP | BS_AUTOCHECKBOX, SwapEyes);
-        control(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_BORDER | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, Entries);
-        control(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST, ProjectionMode);
-        control(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST, StereoMode);
+        }) {
+            auto button = control(L"BUTTON", entry.second, WS_TABSTOP | BS_OWNERDRAW, entry.first);
+            SendMessageW(button, WM_SETFONT, reinterpret_cast<WPARAM>(buttonFont_), FALSE);
+            styleButton(button, entry.first == EnterVr, false);
+        }
+        auto swap = control(L"BUTTON", L"Inverser les yeux", WS_TABSTOP | BS_AUTOCHECKBOX, SwapEyes);
+        SendMessageW(swap, WM_SETFONT, reinterpret_cast<WPARAM>(buttonFont_), FALSE);
+        styleButton(swap, false, true);
+        control(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
+            LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, Entries);
+        for (const auto id : {ProjectionMode, StereoMode}) {
+            styleCombo(control(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, id));
+        }
         for (int i = 0; i < projectionCount; ++i)
             SendDlgItemMessageW(window_, ProjectionMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(projectionName(static_cast<Projection>(i))));
         for (int i = 0; i < stereoCount; ++i)
@@ -645,6 +673,7 @@ private:
         put(item(DepthUp), right + 239, h - 53, 55, 25);
         put(geometry_, right + 309, h - 51, std::max(1, available - 309), 24);
         put(status_, 16, h - 28, w - 32, 22);
+        InvalidateRect(window_, nullptr, TRUE);
     }
 
     void refreshLibrary() {
@@ -824,6 +853,7 @@ private:
     void invalidatePointer() {
         displayedPage_ = VrPage::Hidden;
         pointedRow_ = -1;
+        muteFocused_ = false;
         menuDirty_ = true;
     }
 
@@ -1182,6 +1212,7 @@ private:
             if (event.trigger == VrUi::Trigger::Cancelled) {
                 timelineDrag_.reset();
                 volumeDrag_ = false;
+                muteFocused_ = false;
                 pointedRow_ = -1;
                 menuDirty_ = true;
                 return;
@@ -1209,6 +1240,11 @@ private:
                 return;
             }
             if (page_ == VrPage::Timeline) {
+                const bool overMute = pointer && VrUi::hitsMute(pointer->x, pointer->y);
+                if (muteFocused_ != overMute) {
+                    muteFocused_ = overMute;
+                    menuDirty_ = true;
+                }
                 if (event.confirm && event.trigger == VrUi::Trigger::Idle) command(Play);
                 if (event.confirm && event.trigger == VrUi::Trigger::Pressed) {
                     if (pointer && VrUi::hitsTimeline(pointer->x, pointer->y)) beginTimelineDrag(pointer->x);
@@ -1216,7 +1252,7 @@ private:
                         volume(VrUi::volumePosition(pointer->x));
                         volumeDrag_ = true;
                         menuDirty_ = true;
-                    } else if (pointer && VrUi::hitsMute(pointer->x, pointer->y)) command(Mute);
+                    } else if (overMute) command(Mute);
                     else setPage(VrPage::Hidden);
                 }
                 return;
@@ -1268,6 +1304,19 @@ private:
             subtitle = timeLabel(position) + L" / " + timeLabel(duration);
         }
         displayedFiles_.rows = compact ? std::vector<VrRow>{} : vrRows();
+        for (auto& row : displayedFiles_.rows) {
+            switch (row.action) {
+            case VrAction::ProjectionChoice:
+                row.active = row.entry == (automaticProjection_ ? 0 : 1 + static_cast<int>(view_.projection));
+                break;
+            case VrAction::StereoChoice:
+                row.active = row.entry == (automaticStereo_ ? 0 : 1 + static_cast<int>(view_.stereo));
+                break;
+            case VrAction::SwapEyes: row.active = view_.swapEyes; break;
+            case VrAction::Mute: row.active = media_->muted(); break;
+            default: break;
+            }
+        }
         displayedFiles_.selected = selected_;
         displayedSources_.rows = library ? sourceRows() : std::vector<VrRow>{};
         displayedSources_.selected = sourceSelected_;
@@ -1278,7 +1327,7 @@ private:
         displayedSources_.highlighted = highlightSources ? highlighted : -1;
         menuTexture_->update(title, subtitle, displayedFiles_, library ? &displayedSources_ : nullptr,
             progress, timelineDrag_.has_value(), playback,
-            compact ? std::optional(MenuTexture::AudioControls{volume_, media_->muted(), volumeDrag_}) : std::nullopt);
+            compact ? std::optional(MenuTexture::AudioControls{volume_, media_->muted(), volumeDrag_, muteFocused_}) : std::nullopt);
         displayedPage_ = page_;
         menuDirty_ = false;
         menuRefreshAt_ = now + std::chrono::milliseconds(250);
@@ -1419,19 +1468,49 @@ private:
             else load(file);
             return 0;
         }
+        case WM_DRAWITEM: {
+            const auto& item = *reinterpret_cast<const DRAWITEMSTRUCT*>(l);
+            if (item.CtlType == ODT_BUTTON) paintButton(item);
+            else paintChoice(item);
+            return TRUE;
+        }
+        case WM_MEASUREITEM: {
+            auto& item = *reinterpret_cast<MEASUREITEMSTRUCT*>(l);
+            item.itemHeight = item.CtlType == ODT_LISTBOX ? 30 : 24;
+            return TRUE;
+        }
+        case WM_NOTIFY: {
+            const auto& header = *reinterpret_cast<const NMHDR*>(l);
+            if (header.code == NM_CUSTOMDRAW && (header.idFrom == Seek || header.idFrom == Volume)) {
+                return paintTrack(*reinterpret_cast<const NMCUSTOMDRAW*>(l), header.idFrom == Volume ? violet : accent);
+            }
+            break;
+        }
         case WM_ERASEBKGND: {
             RECT area{};
             GetClientRect(window_, &area);
-            FillRect(reinterpret_cast<HDC>(w), &area, brush_);
+            const auto dc = reinterpret_cast<HDC>(w);
+            FillRect(dc, &area, brush_);
+            rule(dc, 16, area.right - 16, 44);
+            fill(dc, {326, 52, 327, area.bottom - 35}, edge);
+            outline(dc, {15, 119, 322, area.bottom - 33}, edge);
+            outline(dc, {332, 76, area.right - 15, area.bottom - 154}, violet);
+            rule(dc, 16, area.right - 16, area.bottom - 28, 1);
             return 1;
         }
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLORLISTBOX:
-        case WM_CTLCOLORBTN: {
+        case WM_CTLCOLORSTATIC: {
             auto dc = reinterpret_cast<HDC>(w);
-            SetTextColor(dc, textColor);
+            const auto label = reinterpret_cast<HWND>(l);
+            SetTextColor(dc, label == clock_ || label == title_ ? accent :
+                label == status_ || label == location_ || label == geometry_ ? muted : textColor);
             SetBkColor(dc, background);
             return reinterpret_cast<LRESULT>(brush_);
+        }
+        case WM_CTLCOLORLISTBOX: {
+            const auto dc = reinterpret_cast<HDC>(w);
+            SetTextColor(dc, textColor);
+            SetBkColor(dc, panelColor);
+            return reinterpret_cast<LRESULT>(panelBrush_);
         }
         case WM_DESTROY: KillTimer(window_, 1); PostQuitMessage(0); return 0;
         }

@@ -36,6 +36,19 @@ float3 linearize(float3 rgb) {
 float4 display(float4 rgb) {
     return float4(flags.y > 0 ? linearize(rgb.rgb) : rgb.rgb, 1);
 }
+float4 idleBackdrop(float3 ray) {
+    const float3 night = float3(.043, .051, .122);
+    const float horizon = exp(-abs(ray.y) * 15);
+    const float distance = region.y / max(-ray.y, .001);
+    const float2 grid = (region.xz + ray.xz * distance) / .55;
+    const float2 width = max(fwidth(grid), .001);
+    const float2 offset = abs(frac(grid + .5) - .5);
+    const float2 lines = (1 - smoothstep(width * .15, width * 1.1, offset)) *
+        (1 - smoothstep(.22, .55, width));
+    const float plane = (1 - smoothstep(7, 23, distance)) * step(ray.y, -.001);
+    const float3 glow = lerp(float3(.29, .19, .52), float3(.16, .42, .60), saturate(distance / 9));
+    return float4(night + horizon * float3(.09, .042, .10) + plane * max(lines.x, lines.y) * glow, 1);
+}
 struct MeshPoint {
     float3 position : POSITION;
     float2 uv : TEXCOORD0;
@@ -95,15 +108,16 @@ float4 pixel(Vertex input) : SV_TARGET {
         float4 color = image.Sample(samplerLinear, input.uv);
         if (flags.w > 0.0) {
             const float distance = length((input.uv - cameraField.xy) * cameraField.zw);
-            color.rgb = lerp(color.rgb, float3(.13, .07, .24), 1 - smoothstep(8, 9, distance));
-            color.rgb = lerp(color.rgb, float3(.85, .75, 1), 1 - smoothstep(5, 6, distance));
+            color.rgb = lerp(color.rgb, float3(.06, .08, .20), 1 - smoothstep(8, 9, distance));
+            color.rgb = lerp(color.rgb, float3(.45, .83, 1), 1 - smoothstep(5, 6, distance));
         }
         return display(color);
     }
-    if (flags.x == 0.0) return display(background);
     float3 ray = normalize(float3(lerp(frustum.x, frustum.y, input.uv.x),
                                   lerp(frustum.w, frustum.z, input.uv.y), -1));
-    ray = rotate(inversePanorama, rotate(head, ray));
+    ray = rotate(head, ray);
+    if (flags.x == 0.0) return display(idleBackdrop(ray));
+    ray = rotate(inversePanorama, ray);
     float2 uv;
     if (settings.x == 0) {
         if (ray.z >= 0) return display(background);
@@ -219,6 +233,7 @@ void Renderer::draw(ID3D11RenderTargetView* target, unsigned width, unsigned hei
     c.settings = {static_cast<float>(view.projection), view.zoom, aspect, 0};
     const float separation = view.stereo == Stereo::Mono ? 0.f : view.convergence * (eye == 0 ? -1.f : 1.f);
     c.flags = {media.ready() ? 1.f : 0.f, srgb ? 1.f : 0.f, separation, 0};
+    if (!media.ready()) c.region = {camera.gridEye.x, camera.gridEye.y, camera.gridEye.z, 0};
     c.cameraField = {XMConvertToRadians(fieldOfView(view)), XMConvertToRadians(view.verticalFov),
         XMConvertToRadians(view.centerYaw), XMConvertToRadians(view.centerPitch)};
     if (view.projection == Projection::Calibrated && view.mesh && media.ready()) {
