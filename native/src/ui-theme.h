@@ -65,6 +65,10 @@ inline HFONT font(int height, int weight, const wchar_t* face = L"Bahnschrift") 
 }
 
 void styleButton(HWND button, bool primary, bool checkbox);
+void styleViewButton(HWND button, bool grid, bool active);
+void styleQuitButton(HWND button);
+void drawViewIcon(HDC dc, LONG x, LONG y, bool grid, COLORREF color);
+void drawQuitIcon(HDC dc, LONG x, LONG y, bool focused);
 void styleCombo(HWND combo);
 void paintButton(const DRAWITEMSTRUCT& item);
 void paintChoice(const DRAWITEMSTRUCT& item);

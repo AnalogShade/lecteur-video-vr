@@ -31,7 +31,11 @@ Si le Rift est en train de démarrer, le lecteur réessaie pendant 30 secondes. 
 
 La bibliothèque VR affiche les disques montés par Windows. Dans un dossier, **Ajouter ce dossier aux favoris** enregistre son emplacement et l’affiche dans la colonne de gauche. Le même bouton permet de le retirer. Les favoris sont conservés après la fermeture du lecteur.
 
+Les boutons **Liste** et **Grille** changent l’affichage de la bibliothèque dans la fenêtre Windows et dans le casque. Fais défiler la grille avec la molette ou la barre de défilement sous Windows, et avec le joystick dans le casque. Les cartes apparaissent tout de suite et les miniatures se chargent une à la fois pour les vidéos visibles.
+
 Les **Commandes vidéo** donnent accès à la barre de progression, au volume et aux vidéos précédente et suivante du dossier. Dans **Réglages de lecture**, tu peux réappliquer le mode automatique, changer la projection et la stéréo, inverser les yeux, régler le champ ou la convergence 3D et quitter le lecteur.
+
+Le bouton **Quitter**, marqué d’une porte ouverte, ferme le lecteur. Il se trouve en bas à droite de la fenêtre Windows, de la bibliothèque VR et des commandes de lecture, y compris la barre flottante.
 
 Le lecteur enregistre la position des vidéos sur ce PC. Quand tu rouvres une vidéo, elle reprend au dernier point enregistré. Une vidéo terminée repart du début.
 

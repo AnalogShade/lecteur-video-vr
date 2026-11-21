@@ -21,13 +21,19 @@ constexpr float timelineWidth = 1.45f;
 constexpr int timelineTrackStart = margin + 18;
 constexpr int timelineTrackY = 86;
 constexpr int volumeTrackStart = 228;
-constexpr int volumeTrackEnd = 680;
+constexpr int volumeTrackEnd = 596;
 constexpr int volumeTrackY = 166;
-constexpr int muteLeft = 720;
-constexpr int muteRight = width - timelineTrackStart;
+constexpr int muteLeft = 632;
+constexpr int muteRight = 796;
 constexpr int muteTop = 141;
 constexpr int muteBottom = 191;
 enum class Surface { None, Full, Timeline };
+
+inline RECT quitButtonRect(Surface surface) {
+    const int right = surface == Surface::Timeline ? width - timelineTrackStart : width - margin;
+    return surface == Surface::Timeline ? RECT{right - 110, muteTop, right, muteBottom}
+        : RECT{right - 130, 546, right, 584};
+}
 
 inline float surfaceWidth(Surface surface) { return surface == Surface::Timeline ? timelineWidth : panelWidth; }
 inline int surfacePixels(Surface surface) { return surface == Surface::Timeline ? timelineHeight : height; }
@@ -97,6 +103,41 @@ private:
 
 inline int firstRow(int count, int selected) {
     return std::clamp(selected - rows / 2, 0, std::max(0, count - rows));
+}
+
+constexpr int gridColumns = 3;
+constexpr int gridRows = 2;
+constexpr int gridTop = 213;
+constexpr int gridStepX = (width - margin - filesLeft) / gridColumns;
+constexpr int gridStepY = 159;
+constexpr int gridGap = 8;
+
+inline RECT shortcutRect(int index) {
+    const int left = filesLeft + index % gridColumns * gridStepX;
+    const int top = firstY + index / gridColumns * rowStep;
+    return {left, top, left + gridStepX - gridGap, top + rowHeight};
+}
+
+inline RECT cardRect(int slot) {
+    const int left = filesLeft + slot % gridColumns * gridStepX;
+    const int top = gridTop + slot / gridColumns * gridStepY;
+    return {left, top, left + gridStepX - gridGap, top + gridStepY - gridGap};
+}
+
+inline RECT viewButtonRect(bool grid) {
+    const int right = width - margin - (grid ? 0 : 98);
+    return {right - 92, 14, right, 47};
+}
+
+inline bool hitRect(float u, float v, RECT rect, Surface surface = Surface::Full) {
+    const float x = u * width, y = v * surfacePixels(surface);
+    return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+}
+
+inline int firstCard(int count, int selected) {
+    const int lastRow = (std::max(0, count - 1)) / gridColumns;
+    const int selectedRow = std::max(0, selected) / gridColumns;
+    return std::clamp(selectedRow - 1, 0, std::max(0, lastRow - gridRows + 1)) * gridColumns;
 }
 
 inline int hitRow(float u, float v, int count, int selected, int left = margin, int right = width - margin) {

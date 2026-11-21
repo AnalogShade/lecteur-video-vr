@@ -1,11 +1,41 @@
 #include "ui-theme.h"
 
 namespace UiTheme {
+
+void drawViewIcon(HDC dc, LONG x, LONG y, bool grid, COLORREF color) {
+    if (grid) {
+        for (LONG dy : {0, 7})
+            for (LONG dx : {0, 7})
+                fill(dc, {x + dx, y + dy, x + dx + 5, y + dy + 5}, color);
+    } else {
+        for (LONG dy : {0, 5, 10}) {
+            fill(dc, {x, y + dy, x + 2, y + dy + 2}, color);
+            fill(dc, {x + 4, y + dy, x + 12, y + dy + 2}, color);
+        }
+    }
+}
+
+void drawQuitIcon(HDC dc, LONG x, LONG y, bool focused) {
+    outline(dc, {x + 4, y + 2, x + 17, y + 16}, violet);
+    const POINT door[]{{x + 1, y + 3}, {x + 10, y}, {x + 10, y + 18}, {x + 1, y + 15}};
+    const auto oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+    const auto oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+    SetDCBrushColor(dc, selected);
+    SetDCPenColor(dc, focused ? accent : coral);
+    Polygon(dc, door, ARRAYSIZE(door));
+    fill(dc, {x + 6, y + 8, x + 8, y + 10}, focused ? textColor : coral);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+}
+
 namespace {
 constexpr UINT_PTR buttonStyle = 1;
 constexpr DWORD_PTR primaryButton = 1;
 constexpr DWORD_PTR checkButton = 2;
 constexpr DWORD_PTR hoveredButton = 4;
+constexpr DWORD_PTR viewButton = 8;
+constexpr DWORD_PTR gridButton = 16;
+constexpr DWORD_PTR quitButton = 32;
 
 void drawButton(HWND button, HDC dc, RECT area, DWORD_PTR appearance, bool pressed, bool focused) {
     const bool enabled = IsWindowEnabled(button) != FALSE;
@@ -25,11 +55,22 @@ void drawButton(HWND button, HDC dc, RECT area, DWORD_PTR appearance, bool press
     } else {
         InflateRect(&area, -3, 0);
     }
+    const bool view = (appearance & viewButton) != 0;
+    const bool quit = (appearance & quitButton) != 0;
+    if (view) {
+        drawViewIcon(dc, area.left + 5, (area.top + area.bottom) / 2 - 6,
+            (appearance & gridButton) != 0, active || highlight ? accent : violet);
+        area.left += 20;
+    }
+    if (quit) {
+        drawQuitIcon(dc, area.left + 8, (area.top + area.bottom) / 2 - 9, highlight || pressed);
+        area.left += 32;
+    }
     area.right -= 2;
     wchar_t label[128]{};
     GetWindowTextW(button, label, ARRAYSIZE(label));
     const auto oldFont = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(button, WM_GETFONT, 0, 0)));
-    DrawTextW(dc, label, -1, &area, (checkbox ? DT_LEFT : DT_CENTER) |
+    DrawTextW(dc, label, -1, &area, (checkbox || view || quit ? DT_LEFT : DT_CENTER) |
         DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dc, oldFont);
 }
@@ -98,6 +139,18 @@ LRESULT CALLBACK comboProc(HWND combo, UINT message, WPARAM w, LPARAM l, UINT_PT
 
 void styleButton(HWND button, bool primary, bool checkbox) {
     SetWindowSubclass(button, buttonProc, buttonStyle, primary ? primaryButton : checkbox ? checkButton : 0);
+}
+
+void styleViewButton(HWND button, bool grid, bool active) {
+    DWORD_PTR appearance = 0;
+    GetWindowSubclass(button, buttonProc, buttonStyle, &appearance);
+    SetWindowSubclass(button, buttonProc, buttonStyle,
+        (appearance & hoveredButton) | viewButton | (grid ? gridButton : 0) | (active ? primaryButton : 0));
+    InvalidateRect(button, nullptr, FALSE);
+}
+
+void styleQuitButton(HWND button) {
+    SetWindowSubclass(button, buttonProc, buttonStyle, quitButton);
 }
 
 void styleCombo(HWND combo) {

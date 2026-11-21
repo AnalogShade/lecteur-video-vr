@@ -2,6 +2,7 @@
 #include "vr-ui.h"
 #include "video-format.h"
 #include "stereo-probe.h"
+#include "thumbnails.h"
 #include "ui-theme.h"
 #include <commctrl.h>
 #include <dbt.h>
@@ -21,6 +22,7 @@ namespace {
 using namespace UiTheme;
 constexpr wchar_t windowClass[] = L"LecteurVideoVR";
 constexpr wchar_t previewClass[] = L"LecteurVideoVRApercu";
+constexpr wchar_t gridClass[] = L"LecteurVideoVRGrille";
 constexpr wchar_t appName[] = L"Lecteur vidéo VR";
 // Windows 11 caption attributes, also used when building against an older SDK.
 constexpr DWORD dwmDarkMode = 20, dwmBorderColor = 34, dwmCaptionColor = 35, dwmTextColor = 36;
@@ -45,9 +47,48 @@ struct VrRow {
 
 struct VrColumn {
     std::vector<VrRow> rows;
-    int selected = 0;
+    int first = 0, count = 0, selected = 0;
     int highlighted = -1;
 };
+
+void drawLibraryCard(HDC dc, RECT card, const LibraryEntry& entry, bool focused,
+                     const std::shared_ptr<const Thumbnail>& image, int labelHeight) {
+    tile(dc, card, focused);
+    RECT frame{card.left + 6, card.top + 6, card.right - 6, card.bottom - labelHeight};
+    fill(dc, frame, background);
+    if (image) {
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = Thumbnail::width;
+        info.bmiHeader.biHeight = -Thumbnail::height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        const LONG width = frame.right - frame.left, height = frame.bottom - frame.top;
+        const LONG w = std::min(width, height * Thumbnail::width / Thumbnail::height);
+        const LONG h = w * Thumbnail::height / Thumbnail::width;
+        StretchDIBits(dc, frame.left + (width - w) / 2, frame.top + (height - h) / 2, w, h,
+            0, 0, Thumbnail::width, Thumbnail::height, image->pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+    } else {
+        const LONG x = (frame.left + frame.right) / 2, y = (frame.top + frame.bottom) / 2;
+        if (entry.folder) {
+            fill(dc, {x - 15, y - 10, x - 3, y - 5}, violet);
+            outline(dc, {x - 15, y - 6, x + 16, y + 12}, violet);
+            fill(dc, {x - 11, y - 2, x + 12, y + 8}, raised);
+        } else {
+            outline(dc, {x - 15, y - 10, x + 16, y + 11}, edge);
+            const POINT play[]{{x - 4, y - 5}, {x + 6, y}, {x - 4, y + 5}};
+            const POINT photo[]{{x - 10, y + 6}, {x - 2, y - 4}, {x + 11, y + 6}};
+            const auto oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+            const auto oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+            SetDCBrushColor(dc, violet);
+            Polygon(dc, Library::isVideo(entry.path) ? play : photo, 3);
+            SelectObject(dc, oldPen);
+            SelectObject(dc, oldBrush);
+        }
+    }
+    RECT label{card.left + 8, frame.bottom, card.right - 6, card.bottom};
+    DrawTextW(dc, entry.label.c_str(), -1, &label, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
 
 class TestBookmarksFile {
 public:
@@ -75,7 +116,7 @@ public:
 enum Id {
     OpenFile = 100, OpenFolder, Bookmark, Up, Home, Entries, ProjectionMode, StereoMode,
     SwapEyes, ZoomDown, ZoomUp, Center, Play, Back, Forward, Mute, EnterVr, Seek, Volume,
-    Narrow, Widen, DepthDown, DepthUp,
+    Narrow, Widen, DepthDown, DepthUp, ListView, GridView, QuitPlayer,
 };
 
 std::wstring timeLabel(double seconds) {
@@ -128,9 +169,17 @@ public:
         bool muteFocused;
     };
 
+    struct LibraryGrid {
+        const std::vector<LibraryEntry>& entries;
+        const Thumbnails& thumbnails;
+        bool grid;
+        int first;
+        int button;
+    };
+
     void update(const std::wstring& title, const std::wstring& subtitle, const VrColumn& files,
                 const VrColumn* sources, double progress, bool dragging, bool playback,
-                std::optional<AudioControls> audio) {
+                std::optional<AudioControls> audio, std::optional<LibraryGrid> libraryGrid, bool quitFocused) {
         const bool compact = audio.has_value();
         HDC dc = CreateCompatibleDC(nullptr);
         if (!dc) throw std::runtime_error("Création du menu VR impossible.");
@@ -168,13 +217,19 @@ public:
             fill(dc, {handle - radius, y - radius, handle + radius, y + radius}, color);
             fill(dc, {handle - 2, y - radius + 2, handle + 2, y + radius - 2}, textColor);
         };
+        const auto drawQuit = [&](VrUi::Surface surface) {
+            const auto bounds = VrUi::quitButtonRect(surface);
+            tile(dc, bounds, quitFocused);
+            drawQuitIcon(dc, bounds.left + 12, (bounds.top + bounds.bottom) / 2 - 9, quitFocused);
+            auto label = bounds;
+            label.left += 39;
+            DrawTextW(dc, L"Quitter", -1, &label, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        };
         const auto draw = [&](const VrColumn& column, int left, int right) {
-            const int count = static_cast<int>(column.rows.size());
-            const int first = VrUi::firstRow(count, column.selected);
-            for (int i = first; i < count && i < first + VrUi::rows; ++i) {
+            for (int i = 0; i < static_cast<int>(column.rows.size()); ++i) {
                 const auto& row = column.rows[i];
-                const int y = VrUi::firstY + (i - first) * VrUi::rowStep;
-                const bool highlighted = i == column.highlighted;
+                const int y = VrUi::firstY + i * VrUi::rowStep;
+                const bool highlighted = column.first + i == column.highlighted;
                 tile(dc, {left, y, right, y + VrUi::rowHeight}, highlighted, row.active);
                 if (row.action == VrAction::Timeline) {
                     const int start = left + 18, end = right - 18;
@@ -183,7 +238,8 @@ public:
                     line(row.label, y - 4, textColor, start, end);
                     SelectObject(dc, bodyFont);
                 } else {
-                    line(row.label, y, textColor, left + 16, right - 12);
+                    if (row.action == VrAction::Quit) drawQuitIcon(dc, left + 14, y + 11, highlighted);
+                    line(row.label, y, textColor, left + (row.action == VrAction::Quit ? 43 : 16), right - 12);
                 }
             }
         };
@@ -201,10 +257,12 @@ public:
                 textColor, left, VrUi::volumeTrackStart - 16);
             drawTrack(VrUi::volumeTrackStart, VrUi::volumeTrackEnd, VrUi::volumeTrackY,
                 audio->volume / 100., audio->dragging, violet);
+            SelectObject(dc, captionFont);
             tile(dc, {VrUi::muteLeft, VrUi::muteTop, VrUi::muteRight, VrUi::muteBottom},
                 audio->muteFocused, audio->muted);
             line(audio->muted ? L"Rétablir le son" : L"Sourdine", VrUi::volumeTrackY - 19,
                 textColor, VrUi::muteLeft + 12, VrUi::muteRight - 8);
+            drawQuit(VrUi::Surface::Timeline);
         } else {
             SelectObject(dc, titleFont);
             line(title, 14, textColor);
@@ -217,12 +275,54 @@ public:
                 draw(*sources, VrUi::margin, VrUi::sourcesRight);
             }
             line(subtitle, 60, muted, filesStart + 12);
-            draw(files, filesStart, VrUi::width - VrUi::margin);
+            if (libraryGrid) {
+                SelectObject(dc, captionFont);
+                for (const bool grid : {false, true}) {
+                    auto button = VrUi::viewButtonRect(grid);
+                    const bool active = grid == libraryGrid->grid;
+                    const bool hovered = libraryGrid->button == static_cast<int>(grid);
+                    tile(dc, button, hovered, active);
+                    drawViewIcon(dc, button.left + 10, button.top + 10, grid, active || hovered ? accent : violet);
+                    button.left += 30;
+                    DrawTextW(dc, grid ? L"Grille" : L"Liste", -1, &button, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                }
+                if (libraryGrid->grid) {
+                    for (int i = 0; i < static_cast<int>(files.rows.size()); ++i) {
+                        const auto& row = files.rows[i];
+                        const auto bounds = VrUi::shortcutRect(i);
+                        tile(dc, bounds, i == files.highlighted);
+                        auto label = bounds;
+                        label.left += 9;
+                        label.right -= 4;
+                        DrawTextW(dc, row.label.c_str(), -1, &label,
+                            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+                    }
+                    const int end = std::min(static_cast<int>(libraryGrid->entries.size()),
+                        libraryGrid->first + VrUi::gridColumns * VrUi::gridRows);
+                    for (int i = libraryGrid->first; i < end; ++i) {
+                        drawLibraryCard(dc, VrUi::cardRect(i - libraryGrid->first), libraryGrid->entries[i],
+                            i + shortcutsInLibrary == files.highlighted, libraryGrid->thumbnails.get(i), 28);
+                    }
+                    if (end > libraryGrid->first) {
+                        RECT count{VrUi::filesLeft, 545, VrUi::quitButtonRect(VrUi::Surface::Full).left - 12, 585};
+                        const auto label = std::to_wstring(libraryGrid->first + 1) + L"–" +
+                            std::to_wstring(end) + L" / " + std::to_wstring(libraryGrid->entries.size());
+                        SetTextColor(dc, muted);
+                        DrawTextW(dc, label.c_str(), -1, &count, DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                    }
+                }
+                SelectObject(dc, bodyFont);
+            }
+            if (!libraryGrid || !libraryGrid->grid) draw(files, filesStart, VrUi::width - VrUi::margin);
             rule(dc, VrUi::margin, VrUi::width - VrUi::margin, 536);
             SelectObject(dc, captionFont);
+            const bool showQuit = sources || playback;
+            const int hintRight = showQuit ? VrUi::quitButtonRect(VrUi::Surface::Full).left - 12
+                : VrUi::width - VrUi::margin;
             line(dragging ? L"Relâche la gâchette pour reprendre à cet endroit"
                 : playback ? L"Gâchette maintenue : déplacer le curseur   ·   B : retour"
-                : L"Pointe et confirme avec la gâchette ou A     B : retour", 547, accent);
+                : L"Pointe et confirme avec la gâchette ou A     B : retour", 547, accent, 32, hintRight);
+            if (showQuit) drawQuit(VrUi::Surface::Full);
         }
         GdiFlush();
         context_->UpdateSubresource(texture_.Get(), 0, nullptr, pixels, VrUi::width * 4, 0);
@@ -319,6 +419,19 @@ public:
         window.lpszClassName = previewClass;
         window.hIcon = nullptr;
         if (!RegisterClassExW(&window)) throw std::runtime_error("Classe de l’aperçu vidéo introuvable.");
+        window.style = CS_DBLCLKS;
+        window.lpszClassName = gridClass;
+        window.lpfnWndProc = [](HWND grid, UINT message, WPARAM w, LPARAM l) -> LRESULT {
+            auto* player = reinterpret_cast<Player*>(GetWindowLongPtrW(GetParent(grid), GWLP_USERDATA));
+            try {
+                if (player && player->grid_ == grid) return player->gridMessage(message, w, l);
+            } catch (const std::exception& error) {
+                player->show(wide(error.what()));
+                return 0;
+            }
+            return DefWindowProcW(grid, message, w, l);
+        };
+        if (!RegisterClassExW(&window)) throw std::runtime_error("Classe de la grille vidéo introuvable.");
         if (!CreateWindowExW(0, windowClass, appName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT, CW_USEDEFAULT, 1160, 760, nullptr, nullptr, instance, this))
             throw std::runtime_error(startupError_.empty() ? "Création de la fenêtre du lecteur impossible." : fs::path(startupError_).u8string());
@@ -348,8 +461,7 @@ public:
             selected_ = favorite;
             vrMenu();
             const auto favoritePointer = [&] {
-                const int first = VrUi::firstRow(static_cast<int>(displayedFiles_.rows.size()), displayedFiles_.selected);
-                return rayTo(.66f, favorite - first);
+                return rayTo(.66f, favorite - displayedFiles_.first);
             };
             vrPoint({favoritePointer(), true, VrUi::Trigger::Pressed});
             if (!library_.currentIsBookmarked()) throw std::runtime_error("Le bouton Favoris de la bibliothèque a échoué.");
@@ -365,7 +477,83 @@ public:
             const int index = shortcutsInLibrary + static_cast<int>(found - entries.begin());
             selected_ = index;
             if (!vrMenu()) throw std::runtime_error("La texture du menu VR est absente.");
-            const int row = index - VrUi::firstRow(static_cast<int>(displayedFiles_.rows.size()), selected_);
+            const auto pointAt = [](RECT area, VrUi::Surface surface = VrUi::Surface::Full) {
+                return XMFLOAT2{(area.left + area.right) / (2.f * VrUi::width),
+                    (area.top + area.bottom) / (2.f * VrUi::surfacePixels(surface))};
+            };
+            vrPoint({pointAt(VrUi::viewButtonRect(true)), true});
+            if (!gridView_ || !vrMenu() || !displayedGrid_)
+                throw std::runtime_error("Le bouton Grille n’a pas changé l’affichage.");
+            const int entry = index - shortcutsInLibrary;
+            vrPoint({pointAt(VrUi::cardRect(entry - displayedFirstCard_))});
+            if (pointedRow_ != index) throw std::runtime_error("La carte VR ne pointe pas vers le bon fichier.");
+            SendMessageW(grid_, WM_KEYDOWN, VK_HOME, 0);
+            if (gridSelection_ != 0) throw std::runtime_error("Le clavier ne sélectionne pas la première carte Windows.");
+            if (thumbnails_.get(entry)) throw std::runtime_error("La grille a attendu la miniature avant de s’afficher.");
+            const auto waitForThumbnail = [&](int target) {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+                while (!thumbnails_.get(target) && std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+                return thumbnails_.get(target);
+            };
+            if (Library::isVideo(initial)) {
+                updateThumbnails(true, false);
+                if (!waitForThumbnail(entry)) throw std::runtime_error("La miniature visible n’a pas été générée.");
+                const int last = displayedFirstCard_ + VrUi::gridColumns * VrUi::gridRows;
+                for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+                    if ((i < displayedFirstCard_ || i >= last) && thumbnails_.get(i))
+                        throw std::runtime_error("Une miniature hors de la grille a été calculée.");
+                }
+            }
+            if (entries.size() >= 24) {
+                selected_ = shortcutsInLibrary;
+                sourceFocus_ = false;
+                menuDirty_ = true;
+                vrMenu();
+                vrPoint({diskPointer});
+                vrCommand(VrCommand::FocusFiles);
+                for (int i = 0; i < VrUi::gridRows; ++i) {
+                    vrPoint({diskPointer});
+                    vrCommand(VrCommand::Next);
+                    vrMenu();
+                }
+                if (displayedFirstCard_ != VrUi::gridColumns)
+                    throw std::runtime_error("Le joystick n’a pas fait défiler la grille VR.");
+
+                RECT bounds{};
+                GetWindowRect(grid_, &bounds);
+                MSG wheel{item(GridView), WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA),
+                    MAKELPARAM(bounds.left + 12, bounds.top + 12)};
+                dispatch(wheel);
+                if (gridScroll_ != desktopCardHeight)
+                    throw std::runtime_error("La molette n’a pas fait défiler la grille Windows.");
+                SendMessageW(grid_, WM_VSCROLL, SB_BOTTOM, 0);
+                const int last = static_cast<int>(entries.size()) - 1;
+                updateThumbnails(false, true);
+                if (Library::isVideo(entries[last].path) && !waitForThumbnail(last))
+                    throw std::runtime_error("Une miniature en bas de la grille Windows est absente.");
+                selected_ = index;
+            }
+            vrPoint({pointAt(VrUi::viewButtonRect(false)), true});
+            if (gridView_ || !vrMenu() || displayedGrid_)
+                throw std::runtime_error("Le bouton Liste n’a pas rétabli l’affichage.");
+            if (entries.size() >= 24) {
+                const auto list = item(Entries);
+                SendMessageW(list, LB_SETTOPINDEX, 12, 0);
+                const auto top = static_cast<int>(SendMessageW(list, LB_GETTOPINDEX, 0, 0));
+                command(GridView);
+                RECT bounds{};
+                GetClientRect(grid_, &bounds);
+                const auto [first, end] = desktopVisible(bounds.bottom);
+                if (top < first || top >= end)
+                    throw std::runtime_error("Le passage de la liste à la grille a perdu la position.");
+                updateThumbnails(false, true);
+                if (Library::isVideo(entries[top].path) && !waitForThumbnail(top))
+                    throw std::runtime_error("La miniature après le passage de la liste à la grille est absente.");
+                command(ListView);
+                vrMenu();
+            }
+            const int row = index - displayedFiles_.first;
             vrPoint({rayTo(.66f, row), press.update(false, true), VrUi::Trigger::Pressed});
             if (file_ != initial || page_ != VrPage::Hidden)
                 throw std::runtime_error("La gâchette n’a pas sélectionné le fichier.");
@@ -411,7 +599,7 @@ public:
                     throw std::runtime_error("La lecture n’a pas rejoint la position choisie.");
                 const auto volumeStart = aimAtControl(.5f, VrUi::volumeTrackY);
                 const auto volumeEnd = aimAtControl(.35f, VrUi::volumeTrackY);
-                const auto muteButton = aimAtControl(.85f, VrUi::volumeTrackY);
+                const auto muteButton = aimAtControl((VrUi::muteLeft + VrUi::muteRight) / (2.f * VrUi::width), VrUi::volumeTrackY);
                 if (!volumeStart || !volumeEnd || !muteButton)
                     throw std::runtime_error("Le pointeur de test ne touche pas les commandes audio.");
                 const int initialVolume = volume_;
@@ -488,7 +676,27 @@ public:
                 vrCommand(VrCommand::PreviousFile);
                 if (file_ != initial) throw std::runtime_error("La combinaison vers la gauche a ouvert le mauvais fichier.");
             }
-            DestroyWindow(window_);
+            MSG close{};
+            const auto checkQuit = [&](VrPage page, VrUi::Surface surface, VrUi::Trigger trigger) {
+                setPage(page);
+                if (!vrMenu()) throw std::runtime_error("Le menu du bouton Quitter est introuvable.");
+                const auto pointer = pointAt(VrUi::quitButtonRect(surface), surface);
+                vrPoint({pointer});
+                if (!quitFocused_ || PeekMessageW(&close, window_, WM_CLOSE, WM_CLOSE, PM_REMOVE))
+                    throw std::runtime_error("Le survol du bouton Quitter a échoué.");
+                vrPoint({pointer, true, trigger});
+                if (!PeekMessageW(&close, window_, WM_CLOSE, WM_CLOSE, PM_REMOVE))
+                    throw std::runtime_error("Le bouton Quitter du casque n’a pas demandé la fermeture.");
+            };
+            checkQuit(VrPage::Library, VrUi::Surface::Full, VrUi::Trigger::Pressed);
+            checkQuit(VrPage::Playback, VrUi::Surface::Full, VrUi::Trigger::Pressed);
+            checkQuit(VrPage::Timeline, VrUi::Surface::Timeline, VrUi::Trigger::Pressed);
+            checkQuit(VrPage::Timeline, VrUi::Surface::Timeline, VrUi::Trigger::Idle);
+            SendMessageW(item(QuitPlayer), BM_CLICK, 0, 0);
+            if (!PeekMessageW(&close, window_, WM_CLOSE, WM_CLOSE, PM_REMOVE))
+                throw std::runtime_error("Le bouton Quitter de la fenêtre n’a pas demandé la fermeture.");
+            DispatchMessageW(&close);
+            if (IsWindow(window_)) throw std::runtime_error("La fenêtre du lecteur est encore ouverte.");
             return;
         }
         ShowWindow(window_, showCommand);
@@ -523,9 +731,11 @@ public:
 private:
     HWND window_ = nullptr, preview_ = nullptr, title_ = nullptr, location_ = nullptr, name_ = nullptr, status_ = nullptr;
     HWND clock_ = nullptr, geometry_ = nullptr;
+    HWND grid_ = nullptr;
     HFONT font_ = nullptr, buttonFont_ = nullptr, headingFont_ = nullptr;
     HBRUSH brush_ = nullptr, panelBrush_ = nullptr;
     Library library_;
+    Thumbnails thumbnails_;
     std::unique_ptr<Vr> vr_;
     std::unique_ptr<Renderer> renderer_;
     std::unique_ptr<Media> media_;
@@ -545,8 +755,12 @@ private:
     VrPage formatReturnPage_ = VrPage::Library;
     VrPage displayedPage_ = VrPage::Hidden;
     VrColumn displayedFiles_, displayedSources_;
+    bool gridView_ = false, listCurrent_ = false, displayedGrid_ = false, thumbnailViewportDirty_ = false;
+    int gridSelection_ = -1, gridWheel_ = 0, gridScroll_ = 0, displayedFirstCard_ = 0, pointedView_ = -1;
+    static constexpr int desktopColumns = 2, desktopCardHeight = 106, desktopGap = 6;
     std::optional<double> timelineDrag_;
-    bool volumeDrag_ = false, muteFocused_ = false;
+    std::optional<XMFLOAT2> gridPointer_;
+    bool volumeDrag_ = false, muteFocused_ = false, quitFocused_ = false;
     bool sourceFocus_ = true, joystickFocus_ = false, pointedSource_ = false;
     int selected_ = 0, sourceSelected_ = 0, pointedRow_ = -1, librarySelection_ = 0, volume_ = 100;
     unsigned stereoSamples_ = 0;
@@ -586,6 +800,8 @@ private:
         for (const auto& entry : {
             std::pair<int, const wchar_t*>{OpenFile, L"Ouvrir un fichier"}, {OpenFolder, L"Choisir un dossier"},
             {Bookmark, L"★ Favori"}, {Up, L"↑ Dossier parent"}, {Home, L"Disques"},
+            {ListView, L"Liste"}, {GridView, L"Grille"},
+            {QuitPlayer, L"Quitter"},
             {ZoomDown, L"−"}, {ZoomUp, L"+"}, {Center, L"Recentrer"}, {Play, L"Lire / Pause"},
             {Back, L"−10 s"}, {Forward, L"+10 s"}, {Mute, L"Son"}, {EnterVr, L"Entrer en VR"},
             {Narrow, L"Champ −"}, {Widen, L"Champ +"}, {DepthDown, L"3D −"}, {DepthUp, L"3D +"},
@@ -599,6 +815,11 @@ private:
         styleButton(swap, false, true);
         control(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
             LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, Entries);
+        grid_ = control(gridClass, L"Grille de la bibliothèque", WS_TABSTOP | WS_VSCROLL);
+        ShowWindow(grid_, SW_HIDE);
+        styleViewButton(item(ListView), false, true);
+        styleViewButton(item(GridView), true, false);
+        styleQuitButton(item(QuitPlayer));
         for (const auto id : {ProjectionMode, StereoMode}) {
             styleCombo(control(L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS, id));
         }
@@ -643,7 +864,7 @@ private:
         const int right = sidebar + 28;
         const int available = std::max(1, w - right - 16);
         const auto put = [](HWND child, int x, int y, int width, int height) { MoveWindow(child, x, y, width, height, TRUE); };
-        put(title_, 16, 13, sidebar, 28);
+        put(title_, 16, 13, 171, 28);
         put(item(OpenFile), right, 10, 145, 31);
         put(item(OpenFolder), right + 153, 10, 154, 31);
         put(item(EnterVr), w - 151, 10, 135, 31);
@@ -651,7 +872,10 @@ private:
         put(item(Up), 98, 52, 124, 29);
         put(item(Bookmark), 228, 52, 93, 29);
         put(location_, 16, 90, sidebar, 26);
+        put(item(ListView), 190, 10, 62, 31);
+        put(item(GridView), 258, 10, 63, 31);
         put(item(Entries), 16, 120, sidebar, std::max(1, h - 154));
+        put(grid_, 16, 120, sidebar, std::max(1, h - 154));
         put(name_, right, 49, available, 26);
         put(preview_, right, 77, available, std::max(1, h - 232));
         put(item(Seek), right, h - 150, std::max(1, available - 115), 26);
@@ -672,29 +896,196 @@ private:
         put(item(DepthDown), right + 178, h - 53, 55, 25);
         put(item(DepthUp), right + 239, h - 53, 55, 25);
         put(geometry_, right + 309, h - 51, std::max(1, available - 309), 24);
-        put(status_, 16, h - 28, w - 32, 22);
+        put(status_, 16, h - 26, w - 140, 22);
+        put(item(QuitPlayer), w - 116, h - 26, 100, 24);
         InvalidateRect(window_, nullptr, TRUE);
     }
 
-    void refreshLibrary() {
+    void populateList() {
+        if (listCurrent_) return;
         const auto& entries = library_.entries();
         SendDlgItemMessageW(window_, Entries, WM_SETREDRAW, FALSE, 0);
         SendDlgItemMessageW(window_, Entries, LB_RESETCONTENT, 0, 0);
+        SendDlgItemMessageW(window_, Entries, LB_INITSTORAGE, entries.size(), entries.size() * 80);
         for (const auto& entry : entries) {
             const auto label = (entry.folder ? L"▸  " : L"    ") + entry.label;
             SendDlgItemMessageW(window_, Entries, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         }
         SendDlgItemMessageW(window_, Entries, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(item(Entries), nullptr, TRUE);
+        listCurrent_ = true;
+    }
+
+    void refreshLibrary() {
+        thumbnails_.reset();
+        listCurrent_ = false;
+        gridSelection_ = -1;
+        gridWheel_ = 0;
+        scrollGrid(0);
+        if (!gridView_) populateList();
         SetWindowTextW(location_, pathName(library_.location()).c_str());
         EnableWindow(item(Bookmark), !library_.location().empty());
-        librarySelection_ = library_.location().empty() || entries.empty() ? 0 : shortcutsInLibrary;
+        librarySelection_ = library_.location().empty() || library_.entries().empty() ? 0 : shortcutsInLibrary;
         if (page_ == VrPage::Library) {
             selected_ = library_.location().empty() ? 0 : librarySelection_;
             sourceFocus_ = library_.location().empty();
             invalidatePointer();
         }
         menuDirty_ = true;
+    }
+
+    void setLibraryView(bool grid) {
+        if (gridView_ == grid) return;
+        const auto list = item(Entries);
+        const bool focus = GetFocus() == (grid ? list : grid_);
+        gridView_ = grid;
+        styleViewButton(item(ListView), false, !grid);
+        styleViewButton(item(GridView), true, grid);
+        if (grid) {
+            gridSelection_ = listCurrent_ ? static_cast<int>(SendMessageW(list, LB_GETCURSEL, 0, 0)) : -1;
+            const int first = static_cast<int>(SendMessageW(list, LB_GETTOPINDEX, 0, 0));
+            ShowWindow(list, SW_HIDE);
+            ShowWindow(grid_, SW_SHOW);
+            scrollGrid(first / desktopColumns * desktopCardHeight);
+        } else {
+            ShowWindow(grid_, SW_HIDE);
+            populateList();
+            ShowWindow(list, SW_SHOW);
+            SendMessageW(list, LB_SETCURSEL, gridSelection_, 0);
+            SendMessageW(list, LB_SETTOPINDEX, gridScroll_ / desktopCardHeight * desktopColumns, 0);
+            thumbnails_.show({}, library_.entries());
+        }
+        if (focus) SetFocus(grid ? grid_ : list);
+        invalidatePointer();
+    }
+
+    void scrollGrid(int position) {
+        RECT area{};
+        GetClientRect(grid_, &area);
+        const int rows = (static_cast<int>(library_.entries().size()) + desktopColumns - 1) / desktopColumns;
+        const int height = rows * desktopCardHeight + desktopGap;
+        gridScroll_ = std::clamp(position, 0, std::max(0, height - static_cast<int>(area.bottom)));
+        SCROLLINFO scroll{sizeof(scroll), SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL};
+        scroll.nMax = height - 1;
+        scroll.nPage = area.bottom;
+        scroll.nPos = gridScroll_;
+        SetScrollInfo(grid_, SB_VERT, &scroll, TRUE);
+        InvalidateRect(grid_, nullptr, FALSE);
+        thumbnailViewportDirty_ = true;
+    }
+
+    RECT desktopCard(int index, int width) const {
+        const int step = (width - desktopGap) / desktopColumns;
+        const int left = desktopGap + index % desktopColumns * step;
+        const int top = desktopGap + index / desktopColumns * desktopCardHeight - gridScroll_;
+        return {left, top, left + step - desktopGap, top + desktopCardHeight - desktopGap};
+    }
+
+    std::pair<int, int> desktopVisible(int height) const {
+        const int count = static_cast<int>(library_.entries().size());
+        const int first = gridScroll_ / desktopCardHeight * desktopColumns;
+        const int end = (gridScroll_ + height + desktopCardHeight - 1) / desktopCardHeight * desktopColumns;
+        return {std::min(count, first), std::min(count, end)};
+    }
+
+    void paintGrid(HDC dc, RECT area) {
+        fill(dc, area, panelColor);
+        const auto oldFont = SelectObject(dc, font_);
+        const auto [first, end] = desktopVisible(area.bottom);
+        for (int i = first; i < end; ++i) {
+            drawLibraryCard(dc, desktopCard(i, area.right), library_.entries()[i], i == gridSelection_,
+                thumbnails_.get(i), 22);
+        }
+        SelectObject(dc, oldFont);
+    }
+
+    LRESULT gridMessage(UINT event, WPARAM w, LPARAM l) {
+        RECT area{};
+        GetClientRect(grid_, &area);
+        switch (event) {
+        case WM_SIZE: scrollGrid(gridScroll_); return 0;
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            auto dc = BeginPaint(grid_, &paint);
+            const auto buffer = CreateCompatibleDC(dc);
+            const auto bitmap = buffer && area.right > 0 && area.bottom > 0
+                ? CreateCompatibleBitmap(dc, area.right, area.bottom) : nullptr;
+            if (bitmap) {
+                const auto old = SelectObject(buffer, bitmap);
+                paintGrid(buffer, area);
+                BitBlt(dc, 0, 0, area.right, area.bottom, buffer, 0, 0, SRCCOPY);
+                SelectObject(buffer, old);
+                DeleteObject(bitmap);
+            } else paintGrid(dc, area);
+            if (buffer) DeleteDC(buffer);
+            EndPaint(grid_, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT: paintGrid(reinterpret_cast<HDC>(w), area); return 0;
+        case WM_VSCROLL: {
+            SCROLLINFO scroll{sizeof(scroll), SIF_TRACKPOS};
+            GetScrollInfo(grid_, SB_VERT, &scroll);
+            int position = gridScroll_;
+            switch (LOWORD(w)) {
+            case SB_LINEUP: position -= desktopCardHeight; break;
+            case SB_LINEDOWN: position += desktopCardHeight; break;
+            case SB_PAGEUP: position -= area.bottom; break;
+            case SB_PAGEDOWN: position += area.bottom; break;
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: position = scroll.nTrackPos; break;
+            case SB_TOP: position = 0; break;
+            case SB_BOTTOM: position = INT_MAX; break;
+            }
+            scrollGrid(position);
+            return 0;
+        }
+        case WM_MOUSEWHEEL:
+            gridWheel_ += GET_WHEEL_DELTA_WPARAM(w);
+            if (const int steps = gridWheel_ / WHEEL_DELTA) {
+                gridWheel_ %= WHEEL_DELTA;
+                scrollGrid(gridScroll_ - steps * desktopCardHeight);
+            }
+            return 0;
+        case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK: {
+            SetFocus(grid_);
+            const POINT pointer{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            const auto [first, end] = desktopVisible(area.bottom);
+            for (int i = first; i < end; ++i) {
+                const auto card = desktopCard(i, area.right);
+                if (!PtInRect(&card, pointer)) continue;
+                gridSelection_ = i;
+                InvalidateRect(grid_, nullptr, FALSE);
+                if (event == WM_LBUTTONDBLCLK) activateEntry(i);
+                break;
+            }
+            return 0;
+        }
+        case WM_KEYDOWN: {
+            const int count = static_cast<int>(library_.entries().size());
+            if (!count) break;
+            if (w == VK_RETURN) {
+                activateEntry(gridSelection_);
+                return 0;
+            }
+            int next = gridSelection_;
+            switch (w) {
+            case VK_LEFT: --next; break;
+            case VK_RIGHT: ++next; break;
+            case VK_UP: next -= desktopColumns; break;
+            case VK_DOWN: next += desktopColumns; break;
+            case VK_HOME: next = 0; break;
+            case VK_END: next = count - 1; break;
+            case VK_PRIOR: next -= std::max(1L, area.bottom / desktopCardHeight) * desktopColumns; break;
+            case VK_NEXT: next += std::max(1L, area.bottom / desktopCardHeight) * desktopColumns; break;
+            default: return DefWindowProcW(grid_, event, w, l);
+            }
+            gridSelection_ = std::clamp(gridSelection_ < 0 ? 0 : next, 0, count - 1);
+            const auto card = desktopCard(gridSelection_, area.right);
+            scrollGrid(gridScroll_ + std::min(0L, card.top) + std::max(0L, card.bottom - area.bottom));
+            return 0;
+        }
+        }
+        return DefWindowProcW(grid_, event, w, l);
     }
 
     void refreshSettings(bool updateAutoLabels = false) {
@@ -853,8 +1244,12 @@ private:
     void invalidatePointer() {
         displayedPage_ = VrPage::Hidden;
         pointedRow_ = -1;
+        pointedView_ = -1;
+        gridPointer_.reset();
         muteFocused_ = false;
+        quitFocused_ = false;
         menuDirty_ = true;
+        thumbnailViewportDirty_ = true;
     }
 
     void startVr() {
@@ -903,6 +1298,9 @@ private:
             break;
         case Up: library_.up(); refreshLibrary(); break;
         case Home: open({}); break;
+        case ListView: setLibraryView(false); break;
+        case GridView: setLibraryView(true); break;
+        case QuitPlayer: PostMessageW(window_, WM_CLOSE, 0, 0); break;
         case Entries:
             if (notification == LBN_DBLCLK)
                 activateEntry(static_cast<int>(SendDlgItemMessageW(window_, Entries, LB_GETCURSEL, 0, 0)));
@@ -1013,11 +1411,41 @@ private:
         if (library_.location().empty()) return rows;
         rows.push_back({library_.currentIsBookmarked() ? L"★ Retirer ce dossier des favoris"
             : L"☆ Ajouter ce dossier aux favoris", VrAction::Favorite});
-        const auto& entries = library_.entries();
-        for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
-            rows.push_back({(entries[i].folder ? L"▸  " : L"     ") + entries[i].label, VrAction::Entry, i});
-        }
         return rows;
+    }
+
+    VrRow vrEntryRow(int index) const {
+        const auto& entry = library_.entries()[index];
+        return {(entry.folder ? L"▸  " : L"     ") + entry.label, VrAction::Entry, index};
+    }
+
+    int vrEntryCount() const {
+        return page_ == VrPage::Library && !library_.location().empty()
+            ? static_cast<int>(library_.entries().size()) : 0;
+    }
+
+    static VrColumn visibleRows(const std::vector<VrRow>& rows, int selected) {
+        const int count = static_cast<int>(rows.size());
+        const int first = VrUi::firstRow(count, selected);
+        return {{rows.begin() + first, rows.begin() + std::min(count, first + VrUi::rows)}, first, count, selected};
+    }
+
+    VrColumn visibleFiles(bool grid) const {
+        auto rows = vrRows();
+        if (grid) {
+            rows[1].label = L"↑ Parent";
+            rows[3].label = L"Réglages";
+            rows[5].label = rows[5].label.front() == L'★' ? L"★ Favori" : L"☆ Favori";
+            return {std::move(rows), 0, shortcutsInLibrary + vrEntryCount(), selected_};
+        }
+        const int shortcuts = static_cast<int>(rows.size());
+        const int count = shortcuts + vrEntryCount();
+        const int first = VrUi::firstRow(count, selected_);
+        VrColumn visible{{}, first, count, selected_};
+        for (int i = first; i < std::min(count, first + VrUi::rows); ++i) {
+            visible.rows.push_back(i < shortcuts ? std::move(rows[i]) : vrEntryRow(i - shortcuts));
+        }
+        return visible;
     }
 
     std::vector<VrRow> sourceRows() const {
@@ -1131,7 +1559,7 @@ private:
         case VrAction::Quieter: volume(volume_ - 10); break;
         case VrAction::Louder: volume(volume_ + 10); break;
         case VrAction::Resume: setPage(VrPage::Hidden); break;
-        case VrAction::Quit: PostMessageW(window_, WM_CLOSE, 0, 0); break;
+        case VrAction::Quit: command(QuitPlayer); break;
         }
         menuDirty_ = true;
     }
@@ -1169,7 +1597,14 @@ private:
             case VrCommand::FocusSources:
             case VrCommand::FocusFiles:
                 if (page_ == VrPage::Library) {
-                    sourceFocus_ = input == VrCommand::FocusSources;
+                    const bool left = input == VrCommand::FocusSources;
+                    if (gridView_ && !library_.location().empty() && !sourceFocus_) {
+                        const int column = selected_ % VrUi::gridColumns;
+                        if (left && column == 0) sourceFocus_ = true;
+                        else if (left) --selected_;
+                        else if (column < VrUi::gridColumns - 1)
+                            selected_ = std::min(selected_ + 1, shortcutsInLibrary + vrEntryCount() - 1);
+                    } else sourceFocus_ = left;
                     joystickFocus_ = true;
                     menuDirty_ = true;
                 }
@@ -1177,9 +1612,14 @@ private:
             case VrCommand::Previous:
             case VrCommand::Next: {
                 const bool sources = page_ == VrPage::Library && sourceFocus_;
-                const int count = static_cast<int>(sources ? library_.sources().size() : vrRows().size());
+                const int count = sources ? static_cast<int>(library_.sources().size())
+                    : static_cast<int>(vrRows().size()) + vrEntryCount();
                 auto& index = sources ? sourceSelected_ : selected_;
-                index = std::clamp(index + (input == VrCommand::Previous ? -1 : 1), 0, std::max(0, count - 1));
+                const bool rowNavigation = !sources && gridView_ && page_ == VrPage::Library && !library_.location().empty();
+                const int step = rowNavigation ? VrUi::gridColumns : 1;
+                const bool up = input == VrCommand::Previous;
+                if (!rowNavigation || (up ? index >= step : index / step < (count - 1) / step))
+                    index = std::clamp(index + (up ? -step : step), 0, std::max(0, count - 1));
                 joystickFocus_ = true;
                 menuDirty_ = true;
                 break;
@@ -1191,6 +1631,8 @@ private:
                     const auto rows = sources ? sourceRows() : vrRows();
                     const int index = sources ? sourceSelected_ : selected_;
                     if (index >= 0 && index < static_cast<int>(rows.size())) activateVrRow(rows[index]);
+                    else if (!sources && index >= shortcutsInLibrary && index - shortcutsInLibrary < vrEntryCount())
+                        activateVrRow(vrEntryRow(index - shortcutsInLibrary));
                 }
                 break;
             }
@@ -1213,6 +1655,7 @@ private:
                 timelineDrag_.reset();
                 volumeDrag_ = false;
                 muteFocused_ = false;
+                quitFocused_ = false;
                 pointedRow_ = -1;
                 menuDirty_ = true;
                 return;
@@ -1239,6 +1682,19 @@ private:
                 if (pointer) volume(VrUi::volumePosition(pointer->x));
                 return;
             }
+            const bool samePage = displayedPage_ == page_ && page_ != VrPage::Hidden;
+            const bool showQuit = page_ == VrPage::Library || page_ == VrPage::Playback || page_ == VrPage::Timeline;
+            const auto surface = page_ == VrPage::Timeline ? VrUi::Surface::Timeline : VrUi::Surface::Full;
+            const bool overQuit = pointer && samePage && showQuit &&
+                VrUi::hitRect(pointer->x, pointer->y, VrUi::quitButtonRect(surface), surface);
+            if (quitFocused_ != overQuit) {
+                quitFocused_ = overQuit;
+                menuDirty_ = true;
+            }
+            if (event.confirm && overQuit) {
+                command(QuitPlayer);
+                return;
+            }
             if (page_ == VrPage::Timeline) {
                 const bool overMute = pointer && VrUi::hitsMute(pointer->x, pointer->y);
                 if (muteFocused_ != overMute) {
@@ -1258,20 +1714,60 @@ private:
                 return;
             }
             const bool library = page_ == VrPage::Library;
+            if (displayedGrid_ && pointer) {
+                if (gridPointer_ && (std::abs(pointer->x - gridPointer_->x) > .04f ||
+                    std::abs(pointer->y - gridPointer_->y) > .04f)) {
+                    if (joystickFocus_) menuDirty_ = true;
+                    joystickFocus_ = false;
+                }
+                if (!joystickFocus_ || !gridPointer_) gridPointer_ = pointer;
+            }
+            int viewButton = -1;
+            if (pointer && samePage && library && !library_.location().empty()) {
+                for (const bool grid : {false, true}) {
+                    if (VrUi::hitRect(pointer->x, pointer->y, VrUi::viewButtonRect(grid))) viewButton = grid;
+                }
+            }
+            if (pointedView_ != viewButton) {
+                pointedView_ = viewButton;
+                menuDirty_ = true;
+            }
+            if (event.confirm && viewButton >= 0) {
+                setLibraryView(viewButton == 1);
+                return;
+            }
             const bool sources = library && pointer && pointer->x * VrUi::width < VrUi::sourcesRight;
             const auto& column = sources ? displayedSources_ : displayedFiles_;
             const int left = library && !sources ? VrUi::filesLeft : VrUi::margin;
             const int right = sources ? VrUi::sourcesRight : VrUi::width - VrUi::margin;
-            const int hit = pointer && displayedPage_ == page_ && page_ != VrPage::Hidden
-                ? VrUi::hitRow(pointer->x, pointer->y, static_cast<int>(column.rows.size()), column.selected, left, right) : -1;
+            const bool cards = displayedGrid_ && !sources;
+            int hit = -1;
+            if (pointer && samePage) {
+                if (cards) {
+                    for (int i = 0; i < shortcutsInLibrary; ++i) {
+                        if (VrUi::hitRect(pointer->x, pointer->y, VrUi::shortcutRect(i))) hit = i;
+                    }
+                    for (int i = 0; i < VrUi::gridColumns * VrUi::gridRows; ++i) {
+                        const int index = displayedFirstCard_ + i;
+                        if (index < vrEntryCount() && VrUi::hitRect(pointer->x, pointer->y, VrUi::cardRect(i)))
+                            hit = shortcutsInLibrary + index;
+                    }
+                } else {
+                    hit = VrUi::hitRow(pointer->x, pointer->y, column.count, column.selected, left, right);
+                }
+            }
             if (pointedRow_ != hit || (hit >= 0 && pointedSource_ != sources)) {
                 pointedRow_ = hit;
                 pointedSource_ = sources;
                 menuDirty_ = true;
             }
-            if (hit >= 0 && library) sourceFocus_ = sources;
+            if (hit >= 0 && library && (!displayedGrid_ || !joystickFocus_ || event.confirm)) {
+                sourceFocus_ = sources;
+                if (event.confirm) joystickFocus_ = false;
+            }
             if (event.confirm && hit >= 0) {
-                const auto row = column.rows[hit];
+                const auto row = cards && hit >= shortcutsInLibrary
+                    ? vrEntryRow(hit - shortcutsInLibrary) : column.rows[hit - column.first];
                 if (row.action == VrAction::Timeline && event.trigger == VrUi::Trigger::Pressed) {
                     beginTimelineDrag(pointer->x);
                 } else activateVrRow(row, pointer->x);
@@ -1303,7 +1799,13 @@ private:
             const double position = timelineDrag_ ? *timelineDrag_ * duration : media_->time();
             subtitle = timeLabel(position) + L" / " + timeLabel(duration);
         }
-        displayedFiles_.rows = compact ? std::vector<VrRow>{} : vrRows();
+        const bool viewButtons = library && !library_.location().empty();
+        const bool grid = viewButtons && gridView_;
+        const int firstCard = grid ? VrUi::firstCard(vrEntryCount(), selected_ - shortcutsInLibrary) : 0;
+        if (displayedGrid_ != grid || displayedFirstCard_ != firstCard) thumbnailViewportDirty_ = true;
+        displayedGrid_ = grid;
+        displayedFirstCard_ = firstCard;
+        displayedFiles_ = compact ? VrColumn{} : visibleFiles(displayedGrid_);
         for (auto& row : displayedFiles_.rows) {
             switch (row.action) {
             case VrAction::ProjectionChoice:
@@ -1317,17 +1819,17 @@ private:
             default: break;
             }
         }
-        displayedFiles_.selected = selected_;
-        displayedSources_.rows = library ? sourceRows() : std::vector<VrRow>{};
-        displayedSources_.selected = sourceSelected_;
-        const bool usePointer = pointedRow_ >= 0;
+        displayedSources_ = library ? visibleRows(sourceRows(), sourceSelected_) : VrColumn{};
+        const bool usePointer = pointedRow_ >= 0 && (!displayedGrid_ || !joystickFocus_);
         const bool highlightSources = usePointer ? pointedSource_ : library && sourceFocus_;
         const auto highlighted = usePointer ? pointedRow_ : joystickFocus_ ? (highlightSources ? sourceSelected_ : selected_) : -1;
         displayedFiles_.highlighted = highlightSources ? -1 : highlighted;
         displayedSources_.highlighted = highlightSources ? highlighted : -1;
         menuTexture_->update(title, subtitle, displayedFiles_, library ? &displayedSources_ : nullptr,
             progress, timelineDrag_.has_value(), playback,
-            compact ? std::optional(MenuTexture::AudioControls{volume_, media_->muted(), volumeDrag_, muteFocused_}) : std::nullopt);
+            compact ? std::optional(MenuTexture::AudioControls{volume_, media_->muted(), volumeDrag_, muteFocused_}) : std::nullopt,
+            viewButtons ? std::optional(MenuTexture::LibraryGrid{library_.entries(), thumbnails_,
+                displayedGrid_, displayedFirstCard_, pointedView_}) : std::nullopt, quitFocused_);
         displayedPage_ = page_;
         menuDirty_ = false;
         menuRefreshAt_ = now + std::chrono::milliseconds(250);
@@ -1336,6 +1838,15 @@ private:
 
     void dispatch(const MSG& msg) {
         try {
+            if (msg.message == WM_MOUSEWHEEL && gridView_ && !IsIconic(window_)) {
+                RECT bounds{};
+                GetWindowRect(grid_, &bounds);
+                const POINT cursor{GET_X_LPARAM(msg.lParam), GET_Y_LPARAM(msg.lParam)};
+                if (PtInRect(&bounds, cursor)) {
+                    SendMessageW(grid_, msg.message, msg.wParam, msg.lParam);
+                    return;
+                }
+            }
             if (msg.message == WM_KEYDOWN && shortcuts(msg)) return;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -1419,7 +1930,11 @@ private:
         const bool immersive = vr_ && vr_->active();
         if (!immersive) updateMedia();
         if (!immersive || timerCount_ % 2 == 0) preview();
-        if (++timerCount_ % 8) return;
+        const bool refreshStatus = ++timerCount_ % 8 == 0;
+        const bool viewportChanged = std::exchange(thumbnailViewportDirty_, false);
+        if (refreshStatus || viewportChanged)
+            updateThumbnails(immersive, IsWindowVisible(grid_) && !IsIconic(window_));
+        if (!refreshStatus) return;
         const auto error = media_->error();
         if (!error.empty()) {
             auto message = L"Lecture impossible. " + error;
@@ -1433,6 +1948,32 @@ private:
         const auto duration = media_->duration(), current = media_->time();
         if (!seeking_) SendDlgItemMessageW(window_, Seek, TBM_SETPOS, TRUE, duration > 0 ? static_cast<int>(1000 * current / duration) : 0);
         SetWindowTextW(clock_, (timeLabel(current) + L" / " + timeLabel(duration)).c_str());
+    }
+
+    void updateThumbnails(bool immersive, bool desktop) {
+        if (!gridView_) return;
+        std::vector<int> indices;
+        const auto& entries = library_.entries();
+        if (immersive && displayedPage_ == VrPage::Library && displayedGrid_) {
+            const int end = std::min(static_cast<int>(entries.size()),
+                displayedFirstCard_ + VrUi::gridColumns * VrUi::gridRows);
+            for (int i = displayedFirstCard_; i < end; ++i) indices.push_back(i);
+        }
+        if (desktop && !library_.location().empty()) {
+            RECT area{};
+            GetClientRect(grid_, &area);
+            const auto [first, end] = desktopVisible(area.bottom);
+            for (int i = first; i < end; ++i) {
+                const auto card = desktopCard(i, area.right);
+                if (card.bottom > 0 && card.top < area.bottom &&
+                    std::find(indices.begin(), indices.end(), i) == indices.end()) indices.push_back(i);
+            }
+        }
+        thumbnails_.show(indices, entries);
+        if (thumbnails_.changed()) {
+            InvalidateRect(grid_, nullptr, FALSE);
+            if (displayedPage_ == VrPage::Library && displayedGrid_) menuDirty_ = true;
+        }
     }
 
     LRESULT message(UINT event, WPARAM w, LPARAM l) {
@@ -1602,7 +2143,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 TestBookmarksFile bookmarks;
                 Player player(true, bookmarks.path);
                 player.run(instance, SW_HIDE, fs::absolute(options[1]), true);
-                writeDiagnostic(L"Tests sans affichage : favoris, barre flottante, reprise de lecture et choix du format VR.");
+                writeDiagnostic(L"Tests sans casque : liste, défilement de la grille, miniatures, favoris, lecture, format VR et fermeture.");
             } else if (options[0] == L"--inspect-format" && options.size() == 2 && fs::is_regular_file(options[1])) {
                 const auto format = detectFormat(options[1]);
                 std::wostringstream report;
