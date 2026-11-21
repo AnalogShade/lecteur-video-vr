@@ -35,7 +35,8 @@ Le lecteur enregistre la position des vidéos sur ce PC. Quand tu rouvres une vi
 
 ### Projections et fichiers
 
-- **Auto** examine chaque nouvelle vidéo. Il lit les métadonnées spatiales, puis utilise le nom et les premières images si nécessaire. Deux vues semblables côte à côte ou haut/bas peuvent ainsi être reconnues même sans balise. Sur des données ambiguës, choisis la disposition avec la ligne **3D** dans le casque. [Spécification des métadonnées spatiales](https://github.com/google/spatial-media/blob/master/docs/spherical-video-v2-rfc.md)
+- **Auto** lit les métadonnées spatiales et le nom du fichier. Si la disposition reste inconnue, il compare plusieurs images pendant la lecture pour laisser passer un générique ou un écran noir. Deux vues côte à côte ou haut/bas peuvent ainsi être reconnues même sans balise. [Spécification des métadonnées spatiales](https://github.com/google/spatial-media/blob/master/docs/spherical-video-v2-rfc.md)
+- Dans le casque, appuie sur **B** pendant la lecture et ouvre **Format vidéo**. Choisis **180° 3D**, **180° fisheye 3D** ou **360° mono** en une action. Les listes **Projection** et **Disposition** permettent aussi de régler ces paramètres séparément.
 - **VR 180°** et **VR 360°** utilisent une projection équirectangulaire. **Fisheye** attend une image circulaire centrée par œil et son champ est réglable. **Cube 3 × 2** accepte l’atlas standard sans bordure. **Écran plat** sert aux vidéos et aux photos ordinaires.
 - **Mono**, **Côte à côte (SBS)** et **Haut / bas (TB)** sont disponibles dans chaque projection. Sélectionne **Inverser les yeux** si la profondeur paraît à l’envers.
 - Le moteur ouvre notamment les conteneurs MP4, MKV, WebM, MOV et AVI, ainsi que des photos JPEG et PNG. Le codec, le profil d’encodage et la projection varient d’un fichier à l’autre. Les fichiers protégés et les projections propres à certaines caméras nécessitent une prise en charge distincte.

@@ -28,9 +28,10 @@ constexpr int projectionCount = 5;
 constexpr int stereoCount = 3;
 constexpr int shortcutsInLibrary = 6;
 
-enum class VrPage { Hidden, Library, Playback, Settings, Timeline };
+enum class VrPage { Hidden, Library, Playback, Settings, Timeline, Format, Projection, Stereo };
 enum class VrAction {
-    Drives, Parent, Library, Playback, Settings, Source, Entry, Favorite, Auto, Projection, Stereo, SwapEyes,
+    Drives, Parent, Library, Playback, Settings, Source, Entry, Favorite, Auto, Format, Projection, Stereo, SwapEyes,
+    FormatBack, ProjectionChoice, StereoChoice, Preset,
     Narrow, Widen, DepthDown, DepthUp, Play, Timeline, Rewind, Advance, PreviousFile, NextFile, Center,
     Mute, Quieter, Louder, Resume, Quit,
 };
@@ -388,6 +389,24 @@ public:
             }
             vrCommand(VrCommand::Back);
             if (page_ != VrPage::Library) throw std::runtime_error("Le bouton B n’a pas rouvert la bibliothèque.");
+            selected_ = 4;
+            vrCommand(VrCommand::Select);
+            if (page_ != VrPage::Format || !vrMenu()) throw std::runtime_error("Le menu Format vidéo est introuvable.");
+            selected_ = 1;
+            vrCommand(VrCommand::Select);
+            if (page_ != VrPage::Hidden || view_.projection != Projection::Equirect180 || view_.stereo != Stereo::SideBySide)
+                throw std::runtime_error("Le préréglage 180° 3D n’a pas appliqué les deux réglages.");
+            vrCommand(VrCommand::Back);
+            selected_ = 4;
+            vrCommand(VrCommand::Select);
+            selected_ = 4;
+            vrCommand(VrCommand::Select);
+            if (page_ != VrPage::Projection) throw std::runtime_error("La liste des projections est introuvable.");
+            selected_ = 4;
+            vrCommand(VrCommand::Select);
+            if (view_.projection != Projection::Fisheye180 || view_.stereo != Stereo::SideBySide)
+                throw std::runtime_error("Le choix de projection a modifié la disposition des yeux.");
+            vrCommand(VrCommand::Back);
             selected_ = 2;
             vrCommand(VrCommand::Select);
             if (page_ != VrPage::Playback || !vrMenu()) throw std::runtime_error("Le bouton A n’a pas ouvert les commandes.");
@@ -469,12 +488,14 @@ private:
     bool seeking_ = false, menuDirty_ = true, autoStarting_ = false;
     bool automaticProjection_ = true, automaticStereo_ = true;
     VrPage page_ = VrPage::Hidden;
+    VrPage formatReturnPage_ = VrPage::Library;
     VrPage displayedPage_ = VrPage::Hidden;
     VrColumn displayedFiles_, displayedSources_;
     std::optional<double> timelineDrag_;
     bool sourceFocus_ = true, joystickFocus_ = false, pointedSource_ = false;
     int selected_ = 0, sourceSelected_ = 0, pointedRow_ = -1, librarySelection_ = 0, volume_ = 100;
     unsigned stereoSamples_ = 0;
+    double lastStereoPosition_ = -1.;
     std::wstring vrNotice_;
     std::chrono::steady_clock::time_point startupUntil_{}, retryAt_{}, menuRefreshAt_{}, stereoSampleAt_{};
     unsigned timerCount_ = 0;
@@ -666,6 +687,20 @@ private:
         refreshSettings();
     }
 
+    void restartStereoScan() {
+        stereoSamples_ = 0;
+        lastStereoPosition_ = -1.;
+        stereoSampleAt_ = {};
+    }
+
+    void seek(double seconds, bool absolute = false) {
+        media_->seek(seconds, absolute);
+        if ((automaticProjection_ || automaticStereo_) && !(detected_.layoutKnown && detected_.projectionKnown)) {
+            restartStereoScan();
+            stereoSampleAt_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(400);
+        }
+    }
+
     void show(const std::wstring& message) {
         if (status_) SetWindowTextW(status_, message.c_str());
     }
@@ -686,8 +721,7 @@ private:
         file_ = path;
         vrNotice_.clear();
         detected_ = detectFormat(path);
-        stereoSamples_ = 0;
-        stereoSampleAt_ = {};
+        restartStereoScan();
         if (automaticProjection_) applyProjection(0);
         if (automaticStereo_) applyStereo(0);
         refreshSettings(true);
@@ -819,8 +853,8 @@ private:
         case DepthUp: adjustDepth(.005f); break;
         case Center: center(); break;
         case Play: if (!file_.empty()) media_->togglePause(); break;
-        case Back: media_->seek(-10); break;
-        case Forward: media_->seek(10); break;
+        case Back: seek(-10); break;
+        case Forward: seek(10); break;
         case Mute: media_->mute(); break;
         case EnterVr: vrToggle(); break;
         }
@@ -845,6 +879,29 @@ private:
 
     std::vector<VrRow> vrRows() const {
         const auto stereoLabel = std::wstring(automaticStereo_ ? L"3D auto   ·   " : L"3D   ·   ") + stereoName(view_.stereo);
+        if (page_ == VrPage::Format) {
+            return {
+                {L"Auto   ·   détecter la projection et la 3D", VrAction::Preset, 0},
+                {L"180° 3D   ·   côte à côte", VrAction::Preset, 1},
+                {L"180° fisheye 3D   ·   côte à côte", VrAction::Preset, 2},
+                {L"360°   ·   mono", VrAction::Preset, 3},
+                {std::wstring(L"Projection   ›   ") + projectionName(view_.projection), VrAction::Projection},
+                {L"Disposition   ›   " + stereoLabel, VrAction::Stereo},
+                {view_.swapEyes ? L"Permuter les yeux   ·   inversés" : L"Permuter les yeux", VrAction::SwapEyes},
+                {L"← Retour", VrAction::FormatBack},
+            };
+        }
+        if (page_ == VrPage::Projection) {
+            return {{L"Auto", VrAction::ProjectionChoice, 0}, {L"Écran plat", VrAction::ProjectionChoice, 1},
+                {L"180° équirectangulaire", VrAction::ProjectionChoice, 2}, {L"360° équirectangulaire", VrAction::ProjectionChoice, 3},
+                {L"180° fisheye", VrAction::ProjectionChoice, 4}, {L"Cube 3 × 2", VrAction::ProjectionChoice, 5},
+                {L"← Formats vidéo", VrAction::FormatBack}};
+        }
+        if (page_ == VrPage::Stereo) {
+            return {{L"Auto", VrAction::StereoChoice, 0}, {L"Mono", VrAction::StereoChoice, 1},
+                {L"3D côte à côte (SBS)", VrAction::StereoChoice, 2}, {L"3D haut / bas (TB)", VrAction::StereoChoice, 3},
+                {L"← Formats vidéo", VrAction::FormatBack}};
+        }
         if (page_ == VrPage::Playback) {
             const auto duration = media_->duration();
             const double position = timelineDrag_ ? *timelineDrag_ * duration : media_->time();
@@ -852,7 +909,7 @@ private:
                 {L"← Bibliothèque", VrAction::Library},
                 {media_->paused() ? L"Lire" : L"Mettre en pause", VrAction::Play},
                 {timeLabel(position) + L" / " + timeLabel(duration), VrAction::Timeline},
-                {stereoLabel, VrAction::Stereo},
+                {L"Format vidéo", VrAction::Format},
                 {L"Reculer de 10 secondes", VrAction::Rewind}, {L"Avancer de 10 secondes", VrAction::Advance},
                 {L"Vidéo précédente du dossier", VrAction::PreviousFile}, {L"Vidéo suivante du dossier", VrAction::NextFile},
                 {L"Recentrer la vue", VrAction::Center}, {L"Couper ou rétablir le son", VrAction::Mute},
@@ -868,8 +925,7 @@ private:
             return {
                 {L"← Bibliothèque", VrAction::Library}, {L"★ Ajouter ou retirer le dossier des favoris", VrAction::Favorite},
                 {L"Réappliquer la détection automatique", VrAction::Auto},
-                {std::wstring(L"Projection   ·   ") + projectionName(view_.projection), VrAction::Projection},
-                {stereoLabel, VrAction::Stereo},
+                {L"Format vidéo   ·   " + std::wstring(projectionName(view_.projection)), VrAction::Format},
                 {view_.swapEyes ? L"Ordre des yeux   ·   Inversé" : L"Ordre des yeux   ·   Normal", VrAction::SwapEyes},
                 {L"Réduire le champ" + fov, VrAction::Narrow}, {L"Agrandir le champ" + fov, VrAction::Widen},
                 {std::wstring(L"Convergence 3D −") + depth, VrAction::DepthDown},
@@ -878,7 +934,7 @@ private:
         }
         std::vector<VrRow> rows{{L"Accueil", VrAction::Drives}, {L"↑ Dossier parent", VrAction::Parent},
             {L"Commandes vidéo", VrAction::Playback}, {L"Réglages de lecture", VrAction::Settings},
-            {stereoLabel, VrAction::Stereo}};
+            {L"Format vidéo", VrAction::Format}};
         if (library_.location().empty()) return rows;
         rows.push_back({library_.currentIsBookmarked() ? L"★ Retirer ce dossier des favoris"
             : L"☆ Ajouter ce dossier aux favoris", VrAction::Favorite});
@@ -917,6 +973,16 @@ private:
         SendDlgItemMessageW(window_, Volume, TBM_SETPOS, TRUE, volume_);
     }
 
+    void closeFormat() {
+        if (page_ == VrPage::Format) setPage(formatReturnPage_);
+        else setPage(VrPage::Format);
+    }
+
+    void revealVideoFormat() {
+        refreshSettings(true);
+        setPage(VrPage::Hidden);
+    }
+
     void activateVrRow(const VrRow& row, float pointerX = -1.f) {
         vrNotice_.clear();
         switch (row.action) {
@@ -937,18 +1003,36 @@ private:
             break;
         case VrAction::Entry: activateEntry(row.entry); break;
         case VrAction::Favorite: command(Bookmark); break;
-        case VrAction::Auto: applyProjection(0); applyStereo(0); refreshSettings(); break;
-        case VrAction::Projection:
-            applyProjection(view_.projection == Projection::Calibrated ? 1 : 1 + (static_cast<int>(view_.projection) + 1) % projectionCount);
-            refreshSettings();
+        case VrAction::Auto: applyProjection(0); applyStereo(0); restartStereoScan(); refreshSettings(); break;
+        case VrAction::Format:
+            if (file_.empty()) vrNotice_ = L"Ouvre une vidéo pour régler son format.";
+            else {
+                formatReturnPage_ = page_;
+                setPage(VrPage::Format);
+            }
             break;
-        case VrAction::Stereo:
-            if (automaticStereo_) applyStereo(2);
-            else if (view_.stereo == Stereo::SideBySide) applyStereo(3);
-            else if (view_.stereo == Stereo::TopBottom) applyStereo(1);
-            else applyStereo(0);
-            refreshSettings();
+        case VrAction::Projection: setPage(VrPage::Projection); break;
+        case VrAction::Stereo: setPage(VrPage::Stereo); break;
+        case VrAction::FormatBack: closeFormat(); break;
+        case VrAction::ProjectionChoice:
+            applyProjection(row.entry);
+            if (row.entry == 0) restartStereoScan();
+            revealVideoFormat();
             break;
+        case VrAction::StereoChoice:
+            applyStereo(row.entry);
+            if (row.entry == 0) restartStereoScan();
+            revealVideoFormat();
+            break;
+        case VrAction::Preset: {
+            constexpr std::pair<int, int> presets[] = {{0, 0}, {2, 2}, {4, 2}, {3, 1}};
+            const auto& [projection, stereo] = presets[row.entry];
+            applyProjection(projection);
+            applyStereo(stereo);
+            if (row.entry == 0) restartStereoScan();
+            revealVideoFormat();
+            break;
+        }
         case VrAction::SwapEyes: view_.swapEyes = !view_.swapEyes; refreshSettings(); break;
         case VrAction::Narrow: command(Narrow); break;
         case VrAction::Widen: command(Widen); break;
@@ -957,7 +1041,7 @@ private:
         case VrAction::Play: command(Play); break;
         case VrAction::Timeline:
             if (pointerX >= 0) {
-                media_->seek(VrUi::timelinePosition(pointerX) * media_->duration(), true);
+                seek(VrUi::timelinePosition(pointerX) * media_->duration(), true);
             }
             break;
         case VrAction::Rewind: command(Back); break;
@@ -994,6 +1078,7 @@ private:
                 vrNotice_.clear();
                 menuDirty_ = true;
                 if (page_ == VrPage::Timeline) setPage(VrPage::Hidden);
+                else if (page_ == VrPage::Format || page_ == VrPage::Projection || page_ == VrPage::Stereo) closeFormat();
                 else if (page_ != VrPage::Library) setPage(VrPage::Library);
                 else if (!library_.location().empty()) command(Up);
                 else if (media_->ready()) setPage(VrPage::Hidden);
@@ -1062,7 +1147,7 @@ private:
                     const double time = *timelineDrag_ * media_->duration();
                     timelineDrag_.reset();
                     menuDirty_ = true;
-                    media_->seek(time, true);
+                    seek(time, true);
                 }
                 return;
             }
@@ -1104,10 +1189,15 @@ private:
         const bool compact = page_ == VrPage::Timeline;
         const bool playback = compact || page_ == VrPage::Playback;
         if (!menuDirty_ && (!playback || now < menuRefreshAt_)) return menuTexture_->get();
-        const auto title = playback ? L"Commandes vidéo" : page_ == VrPage::Settings ? L"Réglages de lecture" : L"Bibliothèque";
+        const auto title = playback ? L"Commandes vidéo" : page_ == VrPage::Settings ? L"Réglages de lecture"
+            : page_ == VrPage::Projection ? L"Projection" : page_ == VrPage::Stereo ? L"Disposition 3D"
+            : page_ == VrPage::Format ? L"Format vidéo" : L"Bibliothèque";
         const bool library = page_ == VrPage::Library;
         auto subtitle = library && library_.location().empty() ? std::wstring(L"Choisis un disque à gauche")
             : library || file_.empty() ? pathName(library_.location()) : file_.filename().wstring();
+        if (page_ == VrPage::Format || page_ == VrPage::Projection || page_ == VrPage::Stereo) {
+            subtitle = std::wstring(projectionName(view_.projection)) + L"   ·   " + stereoName(view_.stereo);
+        }
         if (!vrNotice_.empty()) subtitle = vrNotice_;
         const double duration = playback ? media_->duration() : 0;
         const double progress = timelineDrag_.value_or(duration > 0 ? std::clamp(media_->time() / duration, 0., 1.) : 0.);
@@ -1169,12 +1259,18 @@ private:
 
     void updateMedia() {
         media_->tick();
-        if (!Library::isVideo(file_) || !media_->ready() || stereoSamples_ >= 3 ||
-            (detected_.layoutKnown && detected_.projectionKnown)) return;
+        constexpr int retryDelayMs[] = {650, 1350, 2000, 2500, 3000, 3500, 4500, 6000, 7000, 9000, 11000, 12000, 14000, 16000};
+        if (!media_->ready() || stereoSamples_ >= std::size(retryDelayMs) ||
+            (detected_.layoutKnown && detected_.projectionKnown) || (!automaticProjection_ && !automaticStereo_)) return;
         const auto now = std::chrono::steady_clock::now();
-        if (now < stereoSampleAt_) return;
-        ++stereoSamples_;
-        stereoSampleAt_ = now + std::chrono::milliseconds(650);
+        if (now < stereoSampleAt_ || !Library::isVideo(file_)) return;
+        const double position = media_->time();
+        if (lastStereoPosition_ >= 0. && std::abs(position - lastStereoPosition_) < .2) {
+            stereoSampleAt_ = now + std::chrono::milliseconds(400);
+            return;
+        }
+        lastStereoPosition_ = position;
+        stereoSampleAt_ = now + std::chrono::milliseconds(retryDelayMs[stereoSamples_++]);
         const bool changedLayout = applyDecoderStereo(detected_, media_->sourceStereo());
         if (detected_.layoutKnown && detected_.view.stereo == Stereo::Mono) return;
         const auto pixels = renderer_->luma(*media_, stereoProbeWidth, stereoProbeHeight);
@@ -1245,7 +1341,7 @@ private:
         case WM_HSCROLL:
             if (reinterpret_cast<HWND>(l) == item(Seek)) {
                 seeking_ = LOWORD(w) == TB_THUMBTRACK;
-                if (!seeking_) media_->seek(media_->duration() * SendDlgItemMessageW(window_, Seek, TBM_GETPOS, 0, 0) / 1000., true);
+                if (!seeking_) seek(media_->duration() * SendDlgItemMessageW(window_, Seek, TBM_GETPOS, 0, 0) / 1000., true);
             } else if (reinterpret_cast<HWND>(l) == item(Volume)) {
                 volume(static_cast<int>(SendDlgItemMessageW(window_, Volume, TBM_GETPOS, 0, 0)));
             }
@@ -1364,7 +1460,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
                 TestBookmarksFile bookmarks;
                 Player player(true, bookmarks.path);
                 player.run(instance, SW_HIDE, fs::absolute(options[1]), true);
-                writeDiagnostic(L"Tests sans affichage : favoris, barre flottante, déplacement du curseur et reprise de lecture.");
+                writeDiagnostic(L"Tests sans affichage : favoris, barre flottante, reprise de lecture et choix du format VR.");
             } else if (options[0] == L"--inspect-format" && options.size() == 2 && fs::is_regular_file(options[1])) {
                 const auto format = detectFormat(options[1]);
                 std::wostringstream report;

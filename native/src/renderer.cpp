@@ -84,6 +84,14 @@ float4 pixel(Vertex input) : SV_TARGET {
     static const float PI = 3.14159265359;
     static const float4 background = float4(0.035, 0.043, 0.075, 1);
     if (flags.x < 0.0) {
+        if (flags.x < -1.5) {
+            float4 average = 0;
+            [unroll] for (int y = -2; y <= 2; ++y) {
+                [unroll] for (int x = -2; x <= 2; ++x)
+                    average += image.Sample(samplerLinear, input.uv + float2(x, y) * cameraField.xy * .2);
+            }
+            return display(average * .04);
+        }
         float4 color = image.Sample(samplerLinear, input.uv);
         if (flags.w > 0.0) {
             const float distance = length((input.uv - cameraField.xy) * cameraField.zw);
@@ -317,7 +325,10 @@ std::vector<uint8_t> Renderer::luma(const Media& media, unsigned width, unsigned
     desc.Usage = D3D11_USAGE_STAGING;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     checked(device_->CreateTexture2D(&desc, nullptr, &staging), "Lecture de l’échantillon");
-    blit(target.Get(), width, height, media.image(), false);
+    Constants probe;
+    probe.flags.x = -2;
+    probe.cameraField = {1.f / width, 1.f / height, 0, 0};
+    render(target.Get(), width, height, media.image(), probe);
     context_->CopyResource(staging.Get(), image.Get());
     std::vector<uint8_t> values(size_t(width) * height);
     D3D11_MAPPED_SUBRESOURCE sample{};

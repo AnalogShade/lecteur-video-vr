@@ -27,14 +27,15 @@ double patch(const Tile& left, const Tile& right, int cx, int cy, int dx, int dy
     return (lr - sumL * sumR / n) / std::sqrt(ll * rr);
 }
 
-double match(const Tile& left, const Tile& right) {
+double match(const Tile& left, const Tile& right, int horizontal = 5, int vertical = 1) {
     double votes = 0;
     int usable = 0;
+    const int xMargin = horizontal + 5, yMargin = vertical + 5;
     for (int y = 1; y <= 5; ++y) for (int x = 1; x <= 6; ++x) {
-        const int cx = 8 + (left.width - 16) * x / 7;
-        const int cy = 7 + (left.height - 14) * y / 6;
+        const int cx = xMargin + (left.width - 2 * xMargin) * x / 7;
+        const int cy = yMargin + (left.height - 2 * yMargin) * y / 6;
         double best = -1.;
-        for (int dy = -1; dy <= 1; ++dy) for (int dx = -5; dx <= 5; ++dx)
+        for (int dy = -vertical; dy <= vertical; ++dy) for (int dx = -horizontal; dx <= horizontal; ++dx)
             best = std::max(best, patch(left, right, cx, cy, dx, dy));
         if (best > -.99) {
             ++usable;
@@ -42,6 +43,25 @@ double match(const Tile& left, const Tile& right) {
         }
     }
     return usable >= 12 ? votes / usable : 0.;
+}
+
+bool viewsDiffer(const Tile& first, const Tile& second) {
+    // A logo duplicated in both halves can look like a lens circle, but supplies no stereo evidence.
+    int changed = 0, total = 0;
+    double difference = 0;
+    for (int y = 8; y < first.height - 8; y += 2) {
+        for (int x = 8; x < first.width - 8; x += 2) {
+            const auto delta = std::abs(first.at(x, y) - second.at(x, y));
+            changed += delta >= 5.;
+            difference += delta;
+            ++total;
+        }
+    }
+    return changed * 10 >= total && difference >= 2. * total;
+}
+
+bool stereoScore(double leftRight, double topBottom, double threshold) {
+    return std::max(leftRight, topBottom) >= threshold && std::abs(leftRight - topBottom) >= .16;
 }
 
 bool lensCircle(const Tile& tile) {
@@ -80,13 +100,25 @@ bool inspectStereoFrame(VideoFormat& format, const std::vector<uint8_t>& luma, f
     auto& view = format.view;
     bool changed = false;
     if (!format.layoutKnown) {
-        const double side = match(left, right), stack = match(top, bottom);
-        if (std::max(side, stack) < .60 || std::abs(side - stack) < .16) return false;
+        const bool sideDistinct = viewsDiffer(left, right), stackDistinct = viewsDiffer(top, bottom);
+        const bool sideGeometry = near(packedAspect, 2.f) || near(packedAspect, 4.f);
+        const bool stackGeometry = near(packedAspect, .5f) || near(packedAspect, 1.f);
+        double side = sideDistinct ? match(left, right) : 0.;
+        double stack = stackDistinct ? match(top, bottom) : 0.;
+        const bool narrowGeometry = side > stack ? sideGeometry : stackGeometry;
+        if (!stereoScore(side, stack, narrowGeometry ? .60 : .70)) {
+            if (!sideGeometry && !stackGeometry) return false;
+            side = sideDistinct ? match(left, right, 14, 3) : 0.;
+            stack = stackDistinct ? match(top, bottom, 14, 3) : 0.;
+            const bool wideGeometry = side > stack ? sideGeometry : stackGeometry;
+            if (!wideGeometry || !stereoScore(side, stack, .58)) return false;
+        }
         view.stereo = side > stack ? Stereo::SideBySide : Stereo::TopBottom;
         format.layoutKnown = changed = true;
     }
     if (!format.projectionKnown && (view.stereo == Stereo::SideBySide || view.stereo == Stereo::TopBottom)) {
         const bool horizontal = view.stereo == Stereo::SideBySide;
+        if (!(horizontal ? viewsDiffer(left, right) : viewsDiffer(top, bottom))) return changed;
         const float perEye = horizontal ? packedAspect * .5f : packedAspect * 2.f;
         if (perEye >= .75f && perEye <= 1.35f &&
             (horizontal ? lensCircle(left) && lensCircle(right) : lensCircle(top) && lensCircle(bottom))) {
